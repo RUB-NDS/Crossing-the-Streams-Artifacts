@@ -6,7 +6,9 @@ services:
   # Other services depend on this completing successfully.
   # ----------------------------------------------------------------------
   keygen:
-    build: ./server          # reuse server image (asyncssh already installed)
+    build:                   # reuse server image (asyncssh already installed)
+      context: .
+      dockerfile: server/Dockerfile
     container_name: poc-keygen
     volumes:
       - ./keys:/keys
@@ -19,7 +21,9 @@ services:
   # SSH server (the victim's remote endpoint).
   # ----------------------------------------------------------------------
   server:
-    build: ./server
+    build:
+      context: .
+      dockerfile: server/Dockerfile
     container_name: poc-server
     hostname: server
     depends_on:
@@ -61,7 +65,9 @@ services:
   # HTTP control API used by the attacker to trigger sends.
   # ----------------------------------------------------------------------
   client:
-    build: ./client
+    build:
+      context: .
+      dockerfile: client/Dockerfile
     container_name: poc-client
     hostname: client
     depends_on:

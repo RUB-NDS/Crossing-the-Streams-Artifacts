@@ -1,0 +1,57 @@
+RFC 4253 §6.2 partial-flush compliance for AsyncSSH 2.18.0
+==========================================================
+
+AsyncSSH 2.x's `_ZLibCompress.compress()` calls `zlib.compressobj.flush()`
+with `Z_SYNC_FLUSH` at the end of every SSH binary packet.  Z_SYNC_FLUSH
+ends the deflate block and emits an empty *stored* block (5 bytes:
+00 00 00 ff ff after byte alignment).
+
+RFC 4253 §6.2 instead specifies a *partial flush*:
+
+   The "zlib" compression is described in [RFC1950] and in [RFC1951].
+   The compression context is initialized after each key exchange, and
+   is passed from one packet to the next, with only a partial flush
+   being performed at the end of each packet.  A partial flush means
+   that the current compressed block is ended and all data will be
+   output.  If the current block is not a stored block, one or more
+   empty blocks are added after the current block to ensure that there
+   are at least 8 bits, counting from the start of the end-of-block
+   code of the current block to the end of the packet payload.
+
+That is exactly what zlib's `Z_PARTIAL_FLUSH` does (an empty *fixed*
+block instead of an empty stored block).  OpenSSH's bundled zlib
+wrapper calls deflate() with Z_PARTIAL_FLUSH on every BPP write.
+
+This patch makes AsyncSSH's compressor wire-format match an
+RFC-compliant implementation so the CRIME-on-SSH PoC's findings
+transfer to spec-conformant SSH stacks rather than being an artifact
+of an AsyncSSH bug.
+
+--- a/asyncssh/compression.py
++++ b/asyncssh/compression.py
+@@ -61,17 +61,23 @@
+
+
+ class _ZLibCompress(Compressor):
+-    """Wrapper class to force a sync flush and handle exceptions"""
++    """Wrapper class to force a partial flush and handle exceptions
++
++    Patched for RFC 4253 §6.2 compliance: AsyncSSH 2.x ships a build
++    that calls zlib Z_SYNC_FLUSH at the end of every SSH binary packet,
++    but the RFC specifies a partial flush (empty fixed block) instead --
++    which is what zlib Z_PARTIAL_FLUSH emits.
++    """
+
+     def __init__(self) -> None:
+         self._comp = zlib.compressobj()
+
+     def compress(self, data: bytes) -> Optional[bytes]:
+-        """Compress data using zlib compression with sync flush"""
++        """Compress data using zlib compression with partial flush"""
+
+         try:
+             return self._comp.compress(data) + \
+-                   self._comp.flush(zlib.Z_SYNC_FLUSH)
++                   self._comp.flush(zlib.Z_PARTIAL_FLUSH)
+         except zlib.error: # pragma: no cover
+             return None

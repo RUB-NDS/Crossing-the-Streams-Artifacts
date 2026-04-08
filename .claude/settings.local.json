@@ -3,7 +3,9 @@
     "allow": [
       "Bash(docker compose:*)",
       "Bash(python scripts/verify.py)",
-      "Bash(python scripts/test_attack.py)"
+      "Bash(python scripts/test_attack.py)",
+      "Bash(PYTHONUNBUFFERED=1 python -u scripts/test_attack.py)",
+      "Bash(PYTHONUNBUFFERED=1 python -u scripts/test_attack_random.py)"
     ]
   }
 }

