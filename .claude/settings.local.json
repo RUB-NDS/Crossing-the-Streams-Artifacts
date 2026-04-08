@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose:*)",
+      "Bash(python scripts/verify.py)",
+      "Bash(python scripts/test_attack.py)"
+    ]
+  }
+}

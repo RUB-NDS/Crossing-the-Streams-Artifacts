@@ -1,0 +1,2 @@
+asyncssh==2.18.0
+cryptography==43.0.3

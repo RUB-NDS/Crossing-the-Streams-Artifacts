@@ -1,0 +1,89 @@
+name: ssh-compression-poc
+
+services:
+  # ----------------------------------------------------------------------
+  # Generates SSH host key + client user key on a shared volume.
+  # Other services depend on this completing successfully.
+  # ----------------------------------------------------------------------
+  keygen:
+    build: ./server          # reuse server image (asyncssh already installed)
+    container_name: poc-keygen
+    volumes:
+      - ./keys:/keys
+      - ./scripts:/scripts:ro
+    command: ["python", "/scripts/keygen.py"]
+    networks:
+      - sshpoc
+
+  # ----------------------------------------------------------------------
+  # SSH server (the victim's remote endpoint).
+  # ----------------------------------------------------------------------
+  server:
+    build: ./server
+    container_name: poc-server
+    hostname: server
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+    volumes:
+      - ./keys:/keys:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - sshpoc
+
+  # ----------------------------------------------------------------------
+  # Attacker: passive MitM at the TCP layer + scapy-based packet observer.
+  # ----------------------------------------------------------------------
+  attacker:
+    build: ./attacker
+    container_name: poc-attacker
+    hostname: attacker
+    depends_on:
+      - server
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SERVER_HOST=server
+      - SERVER_PORT=22
+      - LISTEN_PORT=2222
+      - HTTP_PORT=9000
+      - CLIENT_CONTROL_URL=http://client:8000
+    ports:
+      - "9000:9000"
+    networks:
+      - sshpoc
+
+  # ----------------------------------------------------------------------
+  # Client (the victim host). Connects via the attacker, exposes a small
+  # HTTP control API used by the attacker to trigger sends.
+  # ----------------------------------------------------------------------
+  client:
+    build: ./client
+    container_name: poc-client
+    hostname: client
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+      attacker:
+        condition: service_started
+    volumes:
+      - ./keys:/keys:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SSH_TARGET_HOST=attacker
+      - SSH_TARGET_PORT=2222
+      - SSH_REAL_SERVER=server
+      - SSH_USERNAME=victim
+      - HTTP_PORT=8000
+      - SECRET_VALUE=hunter2
+    ports:
+      - "8000:8000"
+    networks:
+      - sshpoc
+
+networks:
+  sshpoc:
+    driver: bridge
