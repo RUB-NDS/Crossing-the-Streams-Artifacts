@@ -231,7 +231,7 @@ async def handle_run_attack(request: web.Request) -> web.Response:
             body = await request.json()
         except Exception:  # noqa: BLE001
             body = {}
-    known_prefix = body.get("known_prefix", "AUTH ").encode("utf-8")
+    known_prefix = body.get("known_prefix", "*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$").encode("utf-8")
     alphabet = body.get("alphabet", "abcdefghijklmnopqrstuvwxyz0123456789")
     max_length = int(body.get("max_length", 32))
     noise_lengths = body.get("noise_lengths") or list(range(8))

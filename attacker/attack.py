@@ -11,7 +11,7 @@ The attacker injects data by opening TCP connections to the victim's
 web tunnel port.  Data sent on those connections enters the SSH tunnel
 as ``direct-tcpip`` channel data in the **client-to-server** direction,
 sharing the zlib compression context with the victim's Redis
-``AUTH <password>`` traffic on the other tunnel.
+traffic on the other tunnel.
 
 Repeat-until-confident strategy
 -------------------------------
@@ -224,7 +224,7 @@ async def crack_byte_position(
 
 async def run_attack(
     packet_log,
-    known_prefix: bytes = b"AUTH ",
+    known_prefix: bytes = b"*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$",
     alphabet_str: str = "abcdefghijklmnopqrstuvwxyz0123456789",
     max_length: int = 32,
     noise_lengths: list[int] | None = None,

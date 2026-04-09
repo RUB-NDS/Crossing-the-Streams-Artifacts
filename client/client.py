@@ -37,6 +37,7 @@ import sys
 from typing import Optional
 
 import asyncssh
+import redis.asyncio as aioredis
 from aiohttp import web
 
 LOG = logging.getLogger("client")
@@ -71,34 +72,9 @@ DEFAULT_SECRET_VALUE = os.environ.get("SECRET_VALUE", "hunter2")
 COMPRESSION_ALGS = ["zlib@openssh.com", "zlib"]
 
 
-# ---------------------------------------------------------------------------
-# Minimal Redis protocol helpers
-# ---------------------------------------------------------------------------
-
-async def _redis_inline_on(
-    reader: asyncio.StreamReader,
-    writer: asyncio.StreamWriter,
-    *args: str,
-) -> str:
-    """Send an inline Redis command on an already-open connection."""
-    cmd = " ".join(args) + "\r\n"
-    writer.write(cmd.encode("utf-8"))
-    await writer.drain()
-    resp = await asyncio.wait_for(reader.readline(), timeout=5.0)
-    return resp.decode("utf-8", errors="replace").strip()
-
-
-async def _redis_oneshot(host: str, port: int, *cmds: list[str]) -> list[str]:
-    """Open a throw-away connection and run a sequence of inline commands."""
-    reader, writer = await asyncio.open_connection(host, port)
-    results: list[str] = []
-    try:
-        for args in cmds:
-            results.append(await _redis_inline_on(reader, writer, *args))
-    finally:
-        writer.close()
-        await writer.wait_closed()
-    return results
+# Redis username used for ACL-style AUTH (Redis 6+).
+# redis-py sends ``AUTH default <password>`` in RESP format.
+REDIS_USERNAME = "default"
 
 
 # ---------------------------------------------------------------------------
@@ -191,13 +167,15 @@ class SSHState:
         """Set the initial Redis password (Redis starts with none)."""
         for attempt in range(1, 21):
             try:
-                results = await _redis_oneshot(
-                    "127.0.0.1", REDIS_TUNNEL_LOCAL_PORT,
-                    ["CONFIG", "SET", "requirepass", self.secret_value],
+                r = aioredis.Redis(
+                    host="127.0.0.1", port=REDIS_TUNNEL_LOCAL_PORT,
+                    socket_connect_timeout=5,
                 )
-                LOG.info("initial CONFIG SET requirepass: %s", results[0])
+                await r.config_set("requirepass", self.secret_value)
+                await r.aclose()
+                LOG.info("initial CONFIG SET requirepass: OK")
                 return
-            except (OSError, asyncio.TimeoutError) as exc:
+            except (OSError, aioredis.RedisError) as exc:
                 LOG.warning("Redis init attempt %d: %s", attempt, exc)
                 await asyncio.sleep(0.5)
         LOG.error("could not set initial Redis password after retries")
@@ -205,36 +183,37 @@ class SSHState:
     async def send_secret(self) -> int:
         """Simulate the application connecting to Redis and authenticating.
 
-        Opens a fresh TCP connection through the Redis tunnel and sends
-        ``AUTH <password>\\r\\n`` — exactly what a real Redis client does.
         The connection is closed afterwards, just like a short-lived
-        connection-pool checkout.
+        connection-pool checkout.  A PING is sent to force the lazy
+        connection open (triggering AUTH on the wire).
         """
-        cmd = f"AUTH {self.secret_value}\r\n"
-        data = cmd.encode("utf-8")
         async with self._lock:
-            reader, writer = await asyncio.open_connection(
-                "127.0.0.1", REDIS_TUNNEL_LOCAL_PORT,
+            r = aioredis.Redis(
+                host="127.0.0.1", port=REDIS_TUNNEL_LOCAL_PORT,
+                username=REDIS_USERNAME,
+                password=self.secret_value,
+                socket_connect_timeout=5,
             )
             try:
-                writer.write(data)
-                await writer.drain()
-                resp = await asyncio.wait_for(reader.readline(), timeout=5.0)
-                LOG.info("Redis AUTH -> %s", resp.decode("utf-8").strip())
+                await r.ping()
+                LOG.info("Redis AUTH+PING: OK")
             finally:
-                writer.close()
-                await writer.wait_closed()
-        return len(data)
+                await r.aclose()
+        return 0
 
     async def reconfigure_redis(self, new_password: str) -> None:
         """Change the Redis requirepass at runtime via CONFIG SET."""
-        results = await _redis_oneshot(
-            "127.0.0.1", REDIS_TUNNEL_LOCAL_PORT,
-            ["AUTH", self.secret_value],
-            ["CONFIG", "SET", "requirepass", new_password],
+        r = aioredis.Redis(
+            host="127.0.0.1", port=REDIS_TUNNEL_LOCAL_PORT,
+            username=REDIS_USERNAME,
+            password=self.secret_value,
+            socket_connect_timeout=5,
         )
-        LOG.info("Redis reconfig: AUTH=%s  CONFIG SET=%s",
-                 results[0], results[1])
+        try:
+            await r.config_set("requirepass", new_password)
+            LOG.info("Redis CONFIG SET requirepass: OK")
+        finally:
+            await r.aclose()
 
     def status(self) -> dict:
         if self.conn is None:
