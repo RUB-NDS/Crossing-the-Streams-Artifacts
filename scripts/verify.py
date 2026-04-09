@@ -8,12 +8,12 @@ Checks:
   1. attacker HTTP control API responds
   2. client HTTP control API responds AND reports
         - SSH connection established
-        - zlib (or zlib@openssh.com) compression negotiated in both directions
-        - two channels (secret + attacker) open
-  3. attacker can trigger client to send the secret -> we observe
-     non-zero TCP segments on the wire while the action runs
-  4. attacker can trigger client to send an attacker-chosen payload
-     -> same observation
+        - zlib (or zlib@openssh.com) compression negotiated
+        - both port forwards (Redis + web tunnel) active
+  3. attacker can trigger client to send a Redis AUTH -> we observe
+     non-zero TCP segments on the wire
+  4. attacker can inject a payload through the web tunnel -> same
+     observation
 """
 
 from __future__ import annotations
@@ -83,21 +83,25 @@ def main() -> int:
         fail(f"recv compression is {recv_alg!r}, expected zlib*")
     print(f"  [ok] compression negotiated: send={send_alg} recv={recv_alg}")
 
-    chans = cs.get("channels", {})
-    if not (chans.get("secret", {}).get("open") and chans.get("attacker", {}).get("open")):
-        fail(f"both channels should be open, got {chans!r}")
-    print("  [ok] secret + attacker channels open")
+    pf = cs.get("port_forwards", {})
+    web_ok = pf.get("web_tunnel", {}).get("active")
+    redis_ok = pf.get("redis_tunnel", {}).get("active")
+    if not web_ok:
+        fail("web tunnel port forward not active")
+    if not redis_ok:
+        fail("Redis tunnel port forward not active")
+    print(f"  [ok] port forwards active: web={pf['web_tunnel']}  "
+          f"redis={pf['redis_tunnel']}")
 
     step("3. Inspect attacker state")
     asn = http("GET", f"{ATTACKER_BASE}/status")
     print(json.dumps(asn, indent=2))
 
-    step("4. Trigger send_secret and capture packet log")
+    step("4. Trigger Redis AUTH (send_secret) and capture packet log")
     http("POST", f"{ATTACKER_BASE}/clear_log")
     print("  [..] cleared packet log")
     secret_trigger = http("POST", f"{ATTACKER_BASE}/trigger_secret")
     print(f"  [..] trigger_secret response: {secret_trigger}")
-    # Give scapy a beat to flush
     time.sleep(0.4)
     log = http("GET", f"{ATTACKER_BASE}/packet_log")
     secret_records = log["records"]
@@ -106,14 +110,15 @@ def main() -> int:
         print(f"      {r['src']}:{r['sport']} -> {r['dst']}:{r['dport']}  "
               f"len={r['tcp_payload_len']:5d}  flags={r['flags']}")
     if not secret_records:
-        fail("no TCP segments observed during send_secret")
-    print("  [ok] attacker observed packets while sending the secret")
+        fail("no TCP segments observed during Redis AUTH")
+    print("  [ok] attacker observed packets while Redis AUTH was sent")
 
-    step("5. Trigger send_attacker_payload and capture packet log")
+    step("5. Inject payload through web tunnel and capture packet log")
     http("POST", f"{ATTACKER_BASE}/clear_log")
     print("  [..] cleared packet log")
-    payload = b"GUESS=A" * 8
-    payload_trigger = http("POST", f"{ATTACKER_BASE}/trigger_payload", body=payload)
+    payload = b"GET / HTTP/1.0\r\nHost: webhost\r\n\r\n"
+    payload_trigger = http("POST", f"{ATTACKER_BASE}/trigger_payload",
+                           body=payload)
     print(f"  [..] trigger_payload response: {payload_trigger}")
     time.sleep(0.4)
     log = http("GET", f"{ATTACKER_BASE}/packet_log")
@@ -123,15 +128,17 @@ def main() -> int:
         print(f"      {r['src']}:{r['sport']} -> {r['dst']}:{r['dport']}  "
               f"len={r['tcp_payload_len']:5d}  flags={r['flags']}")
     if not payload_records:
-        fail("no TCP segments observed during send_attacker_payload")
-    print("  [ok] attacker observed packets while sending an attacker-chosen payload")
+        fail("no TCP segments observed during web tunnel injection")
+    print("  [ok] attacker observed packets while injecting through web tunnel")
 
     step("VERIFICATION PASSED")
-    print("All three required preconditions are met:")
-    print("  (1) SSH connection up with zlib compression and two channels")
-    print("  (2) attacker observes encrypted SSH packet sizes on the wire")
-    print("  (3) attacker can trigger BOTH the secret send and an")
-    print("      attacker-chosen payload send via the client's HTTP API")
+    print("All preconditions are met:")
+    print("  (1) SSH connection up with zlib compression")
+    print("  (2) Two port forwards active (Redis tunnel + web tunnel)")
+    print("  (3) Attacker observes encrypted SSH packet sizes on the wire")
+    print("  (4) Attacker can trigger Redis AUTH (secret flows c->s)")
+    print("  (5) Attacker can inject data through the web tunnel (c->s)")
+    print("  Both data flows share a single zlib compression context.")
     return 0
 
 

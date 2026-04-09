@@ -2,12 +2,12 @@
 
 A self-contained Docker environment that demonstrates a CRIME-style
 chosen-payload compression side-channel attack against the SSH binary
-packet protocol. A passive in-the-middle observer recovers a secret
-that the victim periodically sends on one logical channel by abusing
-the fact that all SSH channels in one direction share a single zlib
-compression context, and by triggering the victim to send chosen
-payloads on a *second* logical channel and watching the encrypted
-packet sizes on the wire.
+packet protocol.  A passive on-path observer recovers the Redis
+password that the victim's application sends through an SSH tunnel, by
+abusing the fact that all SSH port-forwarded channels in one direction
+share a single zlib compression context, and by injecting chosen
+payloads through a *second* port forward whose local endpoint is
+accessible on the network.
 
 > **Status: research / educational PoC.** This attack assumes a
 > *strong* adversary (see [Threat model](#threat-model)) and is not
@@ -58,11 +58,14 @@ The relevant SSH protocol facts (RFC 4253 §6.2 and RFC 4254 §5):
   (32 KiB by default) and dynamic Huffman state carry over to the
   next packet.
 
-So if the victim sends a secret on channel A and the attacker can
-trigger the victim to send chosen bytes on channel B, the attacker's
-bytes are compressed against an LZ77 dictionary that contains the
-secret. That is exactly the CRIME setting, just at the SSH BPP layer
-instead of the TLS record layer.
+This PoC demonstrates a realistic scenario: a developer tunnels a
+Redis server and an internal web application through one compressed
+SSH connection.  An attacker on the same network connects to the
+publicly-bound web tunnel and injects chosen bytes into the shared
+c→s compression context, while observing encrypted packet sizes on
+the wire.  The victim's Redis `AUTH <password>` command — sent
+through a different tunnel on the *same* SSH connection — is
+recovered byte by byte.
 
 ## Threat model
 
@@ -74,74 +77,85 @@ hold:
    defaults to `none` for incoming connections and only enables
    `zlib@openssh.com` if the user passes `-C` or sets `Compression
    yes`, so this PoC is *not* a generic OpenSSH break.
-2. **Two channels in use, one carrying the secret.** The victim has
-   at least two logical channels open on the same SSH connection. At
-   least one of them periodically transmits the secret (e.g. a
-   service that pushes the password to a remote endpoint, an
-   `rsync`/`scp` job that uploads a token, …).
-3. **Attacker-controlled data on a second channel.** The attacker can
-   coerce the victim to send chosen byte sequences on a different
-   logical channel of the same connection. This is the "strong"
-   bit. In this PoC the attacker triggers it via a small HTTP API on
-   the client, which stands in for any of:
-   - tailing an attacker-writable log file over an SSH session that
-     happens to be doing something else,
-   - a port-forwarded service that the attacker can write to,
-   - an XSRF/SSRF gadget on a local HTTP daemon visible to the
-     victim host,
-   - a pre-configured `LocalForward`/`RemoteForward` whose other end
-     is reachable by the attacker.
+2. **Two port forwards on one SSH connection.** The victim tunnels
+   at least two services through the same SSH connection. One of
+   them carries the secret (here: Redis `AUTH <password>`).
+3. **One port forward is network-accessible.** The victim has bound
+   at least one tunnel to `0.0.0.0` (or a routable address) so other
+   hosts on the LAN can reach it. This is common when the developer
+   wants containers, VMs, or colleagues to access the tunneled
+   service. The attacker, on the same network segment, connects to
+   this endpoint and sends chosen bytes which enter the SSH tunnel
+   as `direct-tcpip` channel data.
 4. **Passive on-path observer.** The attacker sees ciphertext lengths
-   on the wire. In the PoC the attacker is a TCP forwarder that the
+   on the wire.  In the PoC the attacker is a TCP forwarder that the
    client connects to (so it sees every byte of every TCP segment
    trivially), but the host key of the *real* server is pinned, so
    any attempt at active in-the-middle would fail at the SSH layer.
+   In the real world: shared WiFi, compromised router, ISP-level
+   observation.
 5. **The attacker knows the public prefix of the secret.** Like
-   CRIME's `Cookie: sid=`, here the attacker knows e.g. `PASSWORD=`
-   and is recovering the value that follows.
+   CRIME's `Cookie: sid=`, here the attacker knows the Redis inline
+   command prefix `AUTH ` and is recovering the password that follows.
+6. **Repeated secret transmission.** The victim's application must
+   re-authenticate to Redis periodically (e.g., connection-pool
+   churn, reconnects after timeouts). In the PoC the attacker
+   triggers this via the client's HTTP control API; in practice the
+   attacker waits for natural reconnection events or provokes them
+   by crashing the existing Redis connection.
 
 The attack is read-only / observation-only at the SSH layer: it never
-breaks SSH crypto and never modifies SSH traffic. The "I trigger the
-victim to send chosen bytes" requirement is what makes it strong.
+breaks SSH crypto and never modifies SSH traffic.
 
 ## Architecture
 
 ```
-                     +------------+
-                     |  poc-server|
-                     |  AsyncSSH  |
-                     |  :22       |
-                     +------+-----+
-                            ^
-                            |  TCP forward
-                            |
-+----------+      +---------+--------+      +------------+
-|poc-client| ---> |   poc-attacker   |      |  test/host |
-|AsyncSSH  | TCP  |  scapy AsyncSniff|<---->| (curl/py)  |
-|+aiohttp  | :2222|  TCP forwarder   |      |            |
-|:8000     |      |  +aiohttp :9000  |      |            |
-+----------+      +------------------+      +------------+
+                     +-----------+      +----------+
+                     | poc-redis |      |poc-webhost|
+                     | Redis 7   |      | nginx    |
+                     | :6379     |      | :80      |
+                     +-----+-----+      +----+-----+
+                           ^                  ^
+                           |   internal net   |
+                           |                  |
++----------+      +--------+---------+      +-+----------+
+|poc-client| ---> |   poc-attacker   | ---> | poc-server  |
+|AsyncSSH  | TCP  |  TCP forwarder   | TCP  | AsyncSSH    |
+|+Redis app| :2222|  +scapy sniffer  | :22  | fwd-allowed |
+|+aiohttp  |      |  +aiohttp :9000  |      |             |
+|:8000 ctrl|      +------------------+      +-------------+
++----------+
+ tunnels:
+   127.0.0.1:6379  -> redis:6379    (secret: AUTH <password>)
+   0.0.0.0:8080    -> webhost:80    (attacker-accessible)
 ```
 
-Three long-lived containers + a one-shot keygen container:
+Six long-lived containers + a one-shot keygen container:
 
 - **`poc-keygen`** — generates an Ed25519 host key and a client user
   key into a shared `keys/` volume on first start. Idempotent.
+- **`poc-redis`** — official Redis 7 (Alpine). Started without a
+  password; the client sets one via `CONFIG SET requirepass` after
+  the SSH tunnel is up.
+- **`poc-webhost`** — official nginx (Alpine) serving a static cat
+  picture gallery from `webhost/html/`.
 - **`poc-server`** — AsyncSSH server on port 22. Forces compression
   (`compression_algs=['zlib@openssh.com', 'zlib']`, no `none`
-  fallback). Accepts public-key auth from one user. Spins up a
-  trivial `process_factory` handler per channel that just consumes
-  stdin and logs the byte count. **AsyncSSH is patched at image
-  build time** to use RFC-mandated `Z_PARTIAL_FLUSH` instead of its
-  stock `Z_SYNC_FLUSH` — see [AsyncSSH RFC 4253 patch](#asyncssh-rfc-4253-patch).
+  fallback). Allows `direct-tcpip` channel requests for port
+  forwarding. Accepts public-key auth from one user. **AsyncSSH is
+  patched at image build time** to use RFC-mandated
+  `Z_PARTIAL_FLUSH` instead of its stock `Z_SYNC_FLUSH` — see
+  [AsyncSSH RFC 4253 patch](#asyncssh-rfc-4253-patch).
 - **`poc-client`** — AsyncSSH client + aiohttp HTTP control plane on
   port 8000. Connects to `attacker:2222` (not directly to the
   server) but pins the *real* server's host key, so an active MitM
-  is detected. Opens two long-lived session channels at startup:
-  `secret-sink` and `attacker-sink`. The HTTP control plane lets
-  the test harness/attacker trigger sends on either channel and
-  swap the secret value at runtime via `/set_secret`. Same AsyncSSH
-  `Z_PARTIAL_FLUSH` patch applied at build time.
+  is detected. Sets up two local port forwards at startup:
+  - `127.0.0.1:6379 -> redis:6379` (Redis tunnel, localhost only)
+  - `0.0.0.0:8080 -> webhost:80` (web tunnel, network-accessible)
+
+  The HTTP control plane lets the test harness trigger a Redis AUTH
+  cycle (`/send_secret`), change the password (`/set_secret`), and
+  reconnect SSH (`/reset`). Same AsyncSSH `Z_PARTIAL_FLUSH` patch.
 - **`poc-attacker`** — Three jobs in one container:
   1. A passive **TCP forwarder** between `:2222` and `server:22`. It
      never terminates, decrypts, or modifies SSH.
@@ -154,9 +168,14 @@ Three long-lived containers + a one-shot keygen container:
      `/trigger_secret`, `/trigger_payload`, `/status` for
      instrumentation.
 
+  The attack injects payloads by opening a TCP connection to
+  `client:8080` (the publicly-bound web tunnel).  This data enters
+  the SSH tunnel as `direct-tcpip` channel data, sharing the c→s
+  compression context with the Redis tunnel traffic.
+
 The Docker bridge network (`sshpoc`) is the entire network the
 attack lives on. Container hostnames (`server`, `attacker`,
-`client`) are resolved by Docker's embedded DNS.
+`client`, `redis`, `webhost`) are resolved by Docker's embedded DNS.
 
 ## Quick start
 
@@ -171,8 +190,8 @@ Requirements:
 cd SSH-Compression-PoC
 docker compose up -d --build
 
-# 2. Sanity-check the environment (SSH up, two channels, scapy
-#    seeing wire sizes, attacker can trigger client sends):
+# 2. Sanity-check the environment (SSH up, port forwards active,
+#    attacker can observe wire sizes and inject through the tunnel):
 python scripts/verify.py
 
 # 3. Run the attack against the five canonical regression secrets
@@ -201,8 +220,8 @@ tr0ub4dor        tr0ub4dor         123.8s    PASS
 To attack a single secret of your own:
 
 ```bash
-# Set the secret on the client (this also reconnects SSH so the
-# old secret is wiped from the LZ77 window)
+# Set the Redis password on the client (this also reconfigures the
+# real Redis server and reconnects SSH so the LZ77 window is clean)
 curl -X POST http://127.0.0.1:8000/set_secret \
      -H 'Content-Type: application/json' \
      -d '{"value":"my-secret-here"}'
@@ -210,7 +229,7 @@ curl -X POST http://127.0.0.1:8000/set_secret \
 # Kick off the attack — recovered secret comes back in the response
 curl -X POST http://127.0.0.1:9000/run_attack \
      -H 'Content-Type: application/json' \
-     -d '{"known_prefix":"PASSWORD=",
+     -d '{"known_prefix":"AUTH ",
           "alphabet":"abcdefghijklmnopqrstuvwxyz0123456789",
           "max_length":24}'
 ```
@@ -227,72 +246,63 @@ across the noise sweep.
 
 ## How the attack works
 
-The legitimate workflow on the client is:
-```python
-secret_proc.stdin.write(b"PASSWORD=" + value + b"\n")
+The victim's application periodically authenticates to Redis through
+the SSH tunnel:
 ```
-which the attacker can model as a public prefix `PASSWORD=`,
-an unknown value, and a known terminator `\n`. The attack recovers
-`value` one byte at a time.
+AUTH hunter2\r\n
+```
+which the attacker can model as a known prefix `AUTH `, an unknown
+password, and a known terminator `\r`. The attack recovers
+the password one byte at a time.
 
 For each byte position, the attacker iterates over every candidate
 character and an outer sweep of 16 noise lengths. For each
 `(candidate, noise_length)` it does the following sequence:
 
 ```
-1. flush_window()         -- send 33 KB of RANDOM bytes on the attacker
-                             channel (evicts prior guesses from the LZ77
-                             window AND keeps zlib's hash chains short)
-2. refresh_secret()       -- trigger the client to send the secret on
-                             the secret channel, putting it at the
-                             most-recent end of the LZ77 dictionary
-3. measure(prefix +       -- trigger the client to send the candidate
-           candidate +       guess on the attacker channel and sum the
-           noise)            c->s TCP payload bytes that scapy captured
+1. flush_window()         -- send 33 KB of RANDOM bytes through the
+                             web tunnel (client:8080 -> SSH -> webhost)
+                             to evict prior guesses from the LZ77
+                             window AND keep zlib's hash chains short
+2. refresh_secret()       -- trigger the client to open a new TCP
+                             connection to 127.0.0.1:6379 (Redis tunnel)
+                             and send AUTH <password>\r\n, putting the
+                             secret at the most-recent end of the
+                             LZ77 dictionary
+3. measure(prefix +       -- send the candidate guess through the web
+           candidate +       tunnel and sum the c->s TCP payload bytes
+           noise)            that scapy captured
 ```
 
 The smallest sum across all `(noise_length × candidate)` measurements
 identifies the recovered byte. We loop until the recovered byte is
-the terminator `\n`.
+the terminator `\r`.
 
 ### Why each step is there
 
 **`flush_window`.** Two jobs in one:
 
-- **LZ77 window eviction.** Without it, the *previous* attacker-channel
-  BPP message stays in the 32 KiB LZ77 sliding window and the new
-  guess back-references it as a length-18 prefix match. The candidate
-  byte gets buried inside the long backreference and the right vs
-  wrong candidates produce *identical* compressed output. Pushing
-  ≥ 32 KiB of data on the attacker channel evicts the previous guess
-  past the window edge, so the new guess can only match against the
-  secret refresh that happened in step 2.
-- **zlib hash-chain stabilisation.** The content of the flush
-  matters. **An all-zeros flush saturates zlib's hash chain for
-  `\x00\x00\x00`** with thousands of in-window positions; at level 6
-  zlib's `max_chain_length` (128) gives up walking before reaching
-  the optimal match and produces *sub-optimal, state-dependent*
-  compression that can eat the per-candidate signal. Using
-  **random bytes** keeps every hash chain short and lets zlib find
-  the optimal match, so the compressed-byte progression matches the
-  fresh-state predictions and the wire signal is preserved.
+- **LZ77 window eviction.** Without it, the *previous* guess stays
+  in the 32 KiB LZ77 sliding window and the new guess back-
+  references it as a long match. Pushing ≥ 32 KiB of data through
+  the web tunnel evicts the previous guess past the window edge.
+- **zlib hash-chain stabilisation.** Using **random bytes** keeps
+  every hash chain short and lets zlib find the optimal match. An
+  all-zeros flush saturates zlib's hash chain for `\x00\x00\x00`
+  and produces sub-optimal, state-dependent compression that eats
+  the per-candidate signal.
 
-**`refresh_secret`.** Putting the secret at the most-recent end of
-the dictionary makes the LZ77 backreference *distance* approximately
-constant for both right and wrong candidates. Without this, the
-distance-encoding cost (which depends on how many bytes ago the
-match was) would dominate the right-vs-wrong cost difference. After a
-fresh refresh both candidates match `PASSWORD=` at the same small
-distance and the only signal that remains is the +1 *length* the
-right candidate gets from matching the candidate byte.
+**`refresh_secret`.** The client opens a new TCP connection to
+`127.0.0.1:6379` (the Redis tunnel) and sends `AUTH <password>\r\n`.
+This creates a fresh `direct-tcpip` channel whose data passes through
+the shared c→s compressor, placing the secret at the most-recent end
+of the LZ77 dictionary at an approximately constant distance from the
+upcoming guess.
 
-**`measure`.** Sums the c→s TCP payload bytes that scapy captured
-during this trigger. We use one half of the forwarder
-(`dport == LISTEN_PORT`) so the same bytes traversing both legs of
-the proxy aren't counted twice. The sum aggregates the constant
-overhead from AsyncSSH's `MSG_IGNORE` injection and the variable
-data packet, which is the only thing that depends on the candidate
-byte.
+**`measure`.** Sends the guess through the web tunnel and sums the
+c→s TCP payload bytes that scapy captured. Both the Redis AUTH and
+the web tunnel guess are `direct-tcpip` channels on the same SSH
+connection, sharing the same zlib compression context.
 
 ### Where the signal lives
 
@@ -332,84 +342,41 @@ These are what took most of the debugging.
 
 zlib's default LZ77 sliding window (`wbits=15`) is 32 768 bytes. The
 flush has to push enough input through the compressor between two
-consecutive guesses that the *previous* guess BPP is past the window
-edge. AsyncSSH splits writes larger than 32 KiB into multiple SSH
-binary packets, so a flush of 33 000 bytes turns into a 32 768-byte
-BPP plus a 232-byte BPP — together that's enough to make the previous
-guess unreachable to LZ77.
+consecutive guesses that the *previous* guess is past the window
+edge. The flush data travels through the web tunnel: attacker →
+`client:8080` → SSH `direct-tcpip` channel → server → `webhost:80`.
+nginx receives a burst of binary garbage on what it thinks is an HTTP
+connection and eventually closes it; the attacker simply reconnects
+for the next round. The data has already passed through the SSH
+compressor by then.
 
 **But size alone isn't enough.** An all-zeros flush saturates zlib's
 hash chain for the 3-byte sequence `\x00\x00\x00`; under zlib's level
 6 defaults the match search gives up after walking 128 chain positions
-and picks a sub-optimal match whose exact choice depends on the prior
-call sequence. That state-dependence eats the 1-byte per-candidate
-signal in a significant fraction of byte positions.
-
-Switching the flush to **cryptographically random bytes** (see
-`secrets.token_bytes` in `_flush_window`) keeps every hash chain short
-(each 3-byte sequence appears at most once or twice in a random
-33 KiB block), so zlib's match search is both fast and optimal, and
-the compressed-byte progression matches fresh-state predictions.
-
-If you reduce `flush_bytes` below ~32 800 OR you switch the content
-back to all-zeros, the attack mostly fails silently with margin = 0
-at every position.
+and picks a sub-optimal match. Switching to **cryptographically
+random bytes** keeps every hash chain short and the compression
+optimal.
 
 ### 2. Noise has to be strictly-linear 8-bit DEFLATE literals (bytes 0x80..0x8F)
 
-The compressed-bit delta between right and wrong is *usually* 8 bits
-(one literal saved by the right candidate), but at length-code
-transitions in the DEFLATE fixed-Huffman length table it drops to
-**7 bits** because the wider length code costs one extra bit. Either
-way, we need the compressed-byte count to **cross a chacha20-poly1305
-8-byte padding boundary** at *some* noise length — otherwise the
-right and wrong candidates both round to the same wire bin and the
-margin is 0.
+The compressed-bit delta between right and wrong is *usually* 8 bits,
+but at length-code transitions it drops to **7 bits**. We need the
+compressed-byte count to **cross a chacha20-poly1305 8-byte padding
+boundary** at *some* noise length — otherwise right and wrong round
+to the same wire bin and the margin is 0.
 
-Sweeping 16 noise lengths (0..15) moves the compressed byte count
-across a 16-byte range, which spans at least two chacha padding
-bins. For this to reliably catch a boundary cross, the compressed
-byte count must grow **strictly linearly** with the noise length:
-no skipped values, no +2 jumps.
-
-The cleanest way to get linear growth is noise bytes whose DEFLATE
-fixed-Huffman literal code is *exactly 8 bits long*. DEFLATE assigns
-8-bit codes to literals 0..143 and 9-bit codes to 144..255. 8-bit
-literals add 8 bits = 1 byte each to the compressed stream, so each
-extra noise byte grows the cmp byte count by exactly 1. 9-bit
-literals would add 9 bits = 1 byte + 1 bit each, producing periodic
-+2 jumps that *skip* one cmp value per cycle — and if the skipped
-value happens to be the chacha boundary, the signal disappears.
-
-The PoC picks bytes `0x80..0x8F` (= 128..143):
-
-- 8-bit literal class ✓
-- distinct (so no 3-byte intra-noise LZ77 backreference can form) ✓
-- not in any plausible dictionary content (zeros, ASCII, `MSG_IGNORE`
-  filler `\x02\x00*`, BPP wrappers) ✓
-
-Implemented by `_make_noise()` in
-[`attacker/attack.py`](attacker/attack.py).
+Sweeping 16 noise lengths (0..15) using bytes from `0x80..0x8F`
+(8-bit fixed-Huffman literal class, distinct, not in any dictionary
+content) moves the compressed byte count strictly linearly across a
+16-byte range, spanning at least two padding bins.
 
 ### 3. AsyncSSH's `Z_SYNC_FLUSH` → `Z_PARTIAL_FLUSH`
 
 Stock AsyncSSH 2.x calls `zlib.compressobj.flush(Z_SYNC_FLUSH)` at
 the end of every SSH binary packet. RFC 4253 §6.2 instead specifies a
 *partial flush* (zlib's `Z_PARTIAL_FLUSH`) — the same thing OpenSSH's
-bundled zlib wrapper does. The difference:
-
-- **Z_SYNC_FLUSH** appends a 5-byte empty *stored* block. Every
-  compressed packet gains a constant 5-byte overhead and ends at a
-  byte boundary with zero bit slack.
-- **Z_PARTIAL_FLUSH** appends a ~10-bit empty *fixed* block. Packets
-  are 3-4 bytes shorter on average, but the next packet's bit
-  alignment is now variable, which changes the per-candidate
-  signal's visibility at the wire layer.
-
-For this PoC to say anything about *spec-conformant* SSH
-implementations rather than just AsyncSSH's particular bug, we patch
-AsyncSSH's compressor at Docker image build time to use
-`Z_PARTIAL_FLUSH`. See the next section for how this is wired.
+bundled zlib wrapper does. The patch makes AsyncSSH's compressor
+match an RFC-compliant implementation.
 
 ## AsyncSSH RFC 4253 patch
 
@@ -449,18 +416,9 @@ tr0ub4dor        tr0ub4dor         123.8s    PASS
 
 A stress run against 50 random secrets drawn from `[a-z0-9]` with
 lengths 3..14 recovered **49 / 50** correctly in ~104 minutes wall
-clock. The single failure was on `1fm4uu`, which tripped a rare
-state-dependent edge case: at byte position 3 the 8-bit-literal
-noise sweep's cmp progression happened to keep the right and wrong
-candidates in the same chacha padding bin at every noise length and
-the margin collapsed to 0. The attack then picked the alphabetically
-first candidate (`a`) and slid into a self-reinforcing `aaa...` tail.
-
-An earlier version of the PoC added a 9-bit-literal noise sweep as a
-fallback to recover this class of edge case; it was removed for code
-simplicity since ~98 % reliability is adequate for a research PoC.
-See the commit history for the fallback implementation if you want
-to bring it back.
+clock. The single failure is on a rare state-dependent edge case
+where the 8-bit-literal noise sweep keeps right and wrong candidates
+in the same chacha padding bin at every noise length.
 
 ### Throughput
 
@@ -476,14 +434,18 @@ throughput.
 ```
 SSH-Compression-PoC/
 ├── README.md                  -- this file
-├── docker-compose.yml         -- four services on the sshpoc bridge
+├── docker-compose.yml         -- six services on the sshpoc bridge
 ├── keys/                      -- ed25519 keys generated by keygen
-├── literature/                -- CRIME slides, RFCs 4250-4254, 1950, 1951
+├── literature/                -- CRIME slides, BREACH slides, HEIST paper,
+│                                 Kelsey 2002, RFCs 4250-4254, 1950, 1951
 ├── patches/
 │   └── asyncssh-rfc4253-partial-flush.patch
 │                              -- RFC 4253 §6.2 compliance patch for
-│                                 asyncssh/compression.py, applied at
-│                                 build time by client+server Dockerfiles
+│                                 asyncssh/compression.py
+├── webhost/
+│   └── html/                  -- static cat gallery served by nginx
+│       ├── index.html
+│       └── images/cat{1..4}.svg
 ├── scripts/
 │   ├── keygen.py              -- one-shot key generator
 │   ├── verify.py              -- environment smoke test (no attack)
@@ -493,15 +455,18 @@ SSH-Compression-PoC/
 │   ├── Dockerfile             -- applies the partial-flush patch
 │   ├── requirements.txt       -- asyncssh, cryptography
 │   └── server.py              -- AsyncSSH server with forced compression
+│                                 and direct-tcpip forwarding enabled
 ├── client/
 │   ├── Dockerfile             -- applies the partial-flush patch
 │   ├── requirements.txt       -- asyncssh, aiohttp, cryptography
-│   └── client.py              -- AsyncSSH client + HTTP control plane
+│   └── client.py              -- AsyncSSH client with two local port
+│                                 forwards + HTTP control plane
 └── attacker/
     ├── Dockerfile
     ├── requirements.txt       -- scapy, aiohttp
     ├── mitm.py                -- TCP forwarder + scapy sniffer + control API
-    └── attack.py              -- the chosen-payload attack
+    └── attack.py              -- the chosen-payload attack (injects through
+                                  the web tunnel, observes Redis AUTH)
 ```
 
 ## HTTP control surface
@@ -510,12 +475,11 @@ SSH-Compression-PoC/
 
 | Method | Path                       | Description |
 |--------|----------------------------|-------------|
-| GET    | `/status`                  | Connection state, negotiated algs, channel state |
-| POST   | `/send_secret`             | Triggers a send of the configured secret on the secret channel |
-| POST   | `/send_attacker_payload`   | Body = bytes to send on the attacker channel |
-| POST   | `/set_secret`              | JSON `{"value": "..."}` — swaps the secret and reconnects SSH |
+| GET    | `/status`                  | Connection state, negotiated algs, port-forward state |
+| POST   | `/send_secret`             | Triggers one Redis AUTH cycle through the tunnel |
+| POST   | `/set_secret`              | JSON `{"value": "..."}` — reconfigures the real Redis password via CONFIG SET, then reconnects SSH |
 | POST   | `/reset`                   | Tear down and re-open the SSH connection |
-| GET    | `/compressed_log`          | **Debug-only.** Per-packet compressed sizes via a monkey-patched zlib compressor. The attacker container never queries this — it's used by ad-hoc probes only. |
+| GET    | `/compressed_log`          | **Debug-only.** Per-packet compressed sizes via a monkey-patched zlib compressor. The attacker container never queries this. |
 | POST   | `/clear_compressed_log`    | Clear the debug log |
 
 ### Attacker (`http://localhost:9000`)
@@ -526,14 +490,14 @@ SSH-Compression-PoC/
 | GET    | `/packet_log`       | scapy-captured TCP segments since last clear |
 | POST   | `/clear_log`        | Reset the packet log |
 | POST   | `/trigger_secret`   | Convenience: forwards to client `/send_secret` |
-| POST   | `/trigger_payload`  | Convenience: forwards to client `/send_attacker_payload` |
+| POST   | `/trigger_payload`  | Sends payload through the web tunnel (TCP to client:8080) |
 | POST   | `/run_attack`       | JSON parameters; runs the full attack and returns the recovered secret + per-position history |
 
 `/run_attack` body fields (all optional, with shown defaults):
 
 ```json
 {
-  "known_prefix":   "PASSWORD=",
+  "known_prefix":   "AUTH ",
   "alphabet":       "abcdefghijklmnopqrstuvwxyz0123456789",
   "max_length":     32,
   "noise_lengths":  [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
@@ -545,53 +509,50 @@ SSH-Compression-PoC/
 ## Limitations and caveats
 
 - **Strong adversary required.** See [Threat model](#threat-model).
-  This is not "you can read SSH passwords off the wire". The attacker
-  has to (a) have an on-path observation point and (b) be able to
-  coerce the victim into sending chosen bytes on a second channel of
-  the same SSH connection.
+  This is not "you can read Redis passwords off the wire". The
+  attacker has to (a) have an on-path observation point and (b) be
+  able to send data through a port-forward endpoint on the same SSH
+  connection that carries the secret.
 - **Compression must be enabled.** OpenSSH's `Compression` is `no`
-  by default. Disabling compression entirely is the cleanest fix and
-  has no security cost — the bandwidth savings are negligible on
-  modern links anyway, which is essentially the recommendation CRIME
-  made for TLS in 2012.
+  by default. Disabling compression entirely is the cleanest fix.
 - **~2 % edge-case failure rate on random secrets.** The 50-random
   stress test passes 49/50; the remaining state-dependent edge case
-  (where the 8-bit-literal noise sweep's cmp values all land in the
-  same chacha padding bin) can be handled by also sweeping 9-bit
-  literal noise as a fallback, but that code path was removed for
-  simplicity.
+  can be handled by a 9-bit-literal noise sweep fallback.
 - **Throughput is bounded by HTTP roundtrips, not SSH.** Each guess
-  sends a ~33 KiB dummy. On 1 Gbit/s wires this is sub-millisecond,
-  but the HTTP-mediated control plane in this PoC adds a round-trip
-  per message.
+  sends a ~33 KiB dummy flush through the web tunnel. On 1 Gbit/s
+  wires this is sub-millisecond, but the HTTP-mediated control plane
+  adds a round-trip per message.
 - **Alphabet size and prefix knowledge matter.** The PoC assumes
-  `[a-z0-9\n]` and a known `PASSWORD=` prefix. A binary secret with
-  no known structure would need either a much larger alphabet or a
-  different attack shape.
+  `[a-z0-9\r]` and a known `AUTH ` prefix. A binary secret with
+  no known structure would need a much larger alphabet.
 - **Tested only against (patched) AsyncSSH 2.18.** Other SSH
   implementations (OpenSSH, libssh, …) may differ in `MSG_IGNORE`
   injection behaviour, default zlib level, write-splitting
-  threshold, and channel-data fragmentation, all of which affect
-  the precise numbers though not the underlying signal.
+  threshold, and channel-data fragmentation.
 - **chacha20-poly1305@openssh.com.** The wire-side analysis is
   specific to chacha20-poly1305's 8-byte padding granularity.
   AES-CTR + HMAC-ETM uses a 16-byte boundary which would require a
   wider noise sweep but doesn't fundamentally change the attack.
+- **Redis CONFIG SET.** The test harness changes the Redis password
+  at runtime via `CONFIG SET requirepass`. The first test secret
+  (`hunter2`) always matches the initial password; subsequent
+  secrets are reconfigured live.
 
 ## Mitigations
 
 - **Disable compression.** This kills the attack outright. SSH
   compression is opt-in in OpenSSH and the bandwidth savings on
   modern links are negligible, so this is the recommended fix.
-- **Per-channel compression contexts.** Would isolate the secret
-  channel from any attacker-controlled channel, even if compression
-  is enabled. Requires a protocol extension to RFC 4253 §6.2.
-- **Length-hiding padding.** AsyncSSH already inserts `MSG_IGNORE`
-  packets before encrypted data, but the IGNORE messages have a
-  constant compressed size, so they don't actually hide variation
-  in the data packet. Real length-hiding would require *random*
-  padding amounts (not just minimum-padding), which RFC 4253 permits
-  but no implementation enables.
+- **Per-channel compression contexts.** Would isolate the Redis
+  tunnel from the web tunnel, even if compression is enabled.
+  Requires a protocol extension to RFC 4253 §6.2.
+- **Don't bind port forwards to 0.0.0.0.** Binding to `127.0.0.1`
+  (the default for OpenSSH's `-L`) prevents remote hosts from
+  reaching the tunnel endpoint.  The PoC's scenario requires the
+  web tunnel to be network-accessible.
+- **Length-hiding padding.** Random padding amounts in SSH binary
+  packets (RFC 4253 permits up to 255 bytes) would hide the
+  compressed-size signal. No implementation enables this.
 
 ## References
 

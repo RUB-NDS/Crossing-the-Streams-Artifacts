@@ -18,7 +18,34 @@ services:
       - sshpoc
 
   # ----------------------------------------------------------------------
-  # SSH server (the victim's remote endpoint).
+  # Internal Redis server.  The victim's application authenticates to it
+  # with AUTH <password> through the SSH tunnel.  Started WITHOUT a
+  # password -- the client sets one via CONFIG SET after the tunnel is up.
+  # ----------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: poc-redis
+    hostname: redis
+    networks:
+      - sshpoc
+
+  # ----------------------------------------------------------------------
+  # Internal nginx web server serving cat pictures.  The victim tunnels
+  # it on 0.0.0.0:8080 so other devices on the LAN can reach it --
+  # which is the attack surface the attacker exploits.
+  # ----------------------------------------------------------------------
+  webhost:
+    image: nginx:alpine
+    container_name: poc-webhost
+    hostname: webhost
+    volumes:
+      - ./webhost/html:/usr/share/nginx/html:ro
+    networks:
+      - sshpoc
+
+  # ----------------------------------------------------------------------
+  # SSH server (the bastion / jump host).  Forces compression, allows
+  # TCP/IP port forwarding to redis and webhost on the internal network.
   # ----------------------------------------------------------------------
   server:
     build:
@@ -29,6 +56,10 @@ services:
     depends_on:
       keygen:
         condition: service_completed_successfully
+      redis:
+        condition: service_started
+      webhost:
+        condition: service_started
     volumes:
       - ./keys:/keys:ro
     environment:
@@ -37,7 +68,8 @@ services:
       - sshpoc
 
   # ----------------------------------------------------------------------
-  # Attacker: passive MitM at the TCP layer + scapy-based packet observer.
+  # Attacker: passive MitM at the TCP layer + scapy packet observer +
+  # attack orchestrator.  Sits on the path between client and server.
   # ----------------------------------------------------------------------
   attacker:
     build: ./attacker
@@ -55,14 +87,17 @@ services:
       - LISTEN_PORT=2222
       - HTTP_PORT=9000
       - CLIENT_CONTROL_URL=http://client:8000
+      - CLIENT_HOST=client
+      - WEB_TUNNEL_PORT=8080
     ports:
       - "9000:9000"
     networks:
       - sshpoc
 
   # ----------------------------------------------------------------------
-  # Client (the victim host). Connects via the attacker, exposes a small
-  # HTTP control API used by the attacker to trigger sends.
+  # Client (the victim host).  Connects via the attacker's TCP forwarder,
+  # sets up two local port forwards (Redis + web), and exposes a small
+  # HTTP control API used by the test harness.
   # ----------------------------------------------------------------------
   client:
     build:
@@ -75,6 +110,10 @@ services:
         condition: service_completed_successfully
       attacker:
         condition: service_started
+      redis:
+        condition: service_started
+      webhost:
+        condition: service_started
     volumes:
       - ./keys:/keys:ro
     environment:
@@ -84,6 +123,10 @@ services:
       - SSH_REAL_SERVER=server
       - SSH_USERNAME=victim
       - HTTP_PORT=8000
+      - WEB_TUNNEL_DEST_HOST=webhost
+      - WEB_TUNNEL_DEST_PORT=80
+      - REDIS_TUNNEL_DEST_HOST=redis
+      - REDIS_TUNNEL_DEST_PORT=6379
       - SECRET_VALUE=hunter2
     ports:
       - "8000:8000"

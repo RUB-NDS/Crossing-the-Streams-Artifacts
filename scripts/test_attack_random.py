@@ -1,13 +1,10 @@
-"""Stress-test the CRIME-on-SSH attack against 50 random secrets.
+"""Stress-test the CRIME-on-SSH attack against 50 random Redis passwords.
 
 Generates 50 random passwords of varying lengths over the lowercase
 alphanumeric alphabet, sets each one via the client's /set_secret
-endpoint, runs the attack via the attacker's /run_attack endpoint,
-and verifies that the recovered value matches the planted secret.
-
-Designed to surface edge cases (rare characters, repeated bytes,
-unusual lengths) that the small five-secret regression suite might
-not catch.
+endpoint (which also reconfigures the real Redis server), runs the
+attack via the attacker's /run_attack endpoint, and verifies that the
+recovered value matches the planted secret.
 
 Run from the host while the docker-compose stack is up:
 
@@ -25,7 +22,7 @@ import urllib.request
 ATTACKER_BASE = "http://127.0.0.1:9000"
 CLIENT_BASE = "http://127.0.0.1:8000"
 
-PREFIX = "PASSWORD="
+PREFIX = "AUTH "
 ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 # Use a fixed seed so the test is reproducible across runs.
@@ -59,8 +56,6 @@ def run_attack(max_length: int) -> dict:
         "known_prefix": PREFIX,
         "alphabet": ALPHABET,
         "max_length": max_length,
-        "noise_lengths": list(range(16)),
-        "settle": 0.005,
     }).encode("utf-8")
     return http("POST", f"{ATTACKER_BASE}/run_attack", body=body,
                 content_type="application/json")
@@ -73,7 +68,7 @@ def main() -> int:
         for _ in range(N_SECRETS)
     ]
 
-    print("CRIME-on-SSH PoC: 50-secret stress test")
+    print("CRIME-on-SSH PoC: 50-secret stress test (Redis AUTH)")
     print(f"Seed:      {SEED} (reproducible)")
     print(f"Alphabet:  {ALPHABET!r}  ({len(ALPHABET)} chars + terminator)")
     print(f"Lengths:   {LEN_MIN}..{LEN_MAX} characters")
@@ -85,11 +80,11 @@ def main() -> int:
     for idx, secret in enumerate(secrets_list, 1):
         print(f"[{idx:>2}/{N_SECRETS}] target = {secret!r:<18}", end="", flush=True)
         set_secret(secret)
-        time.sleep(1.0)
+        time.sleep(2.0)
         started = time.time()
         try:
             result = run_attack(max_length=len(secret) + 4)
-            recovered = result.get("recovered", "").rstrip("\n")
+            recovered = result.get("recovered", "").rstrip("\r\n")
             ok = recovered == secret
         except Exception as exc:  # noqa: BLE001
             recovered = f"<error: {exc!s}>"

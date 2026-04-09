@@ -1,11 +1,9 @@
 """SSH server side of the CRIME-on-SSH PoC.
 
 Forces zlib compression in both directions, accepts a single user
-authenticating with a public key, and exposes two trivial sinks (one
-intended to receive the secret, the other intended to receive the
-attacker's chosen payload).  All inputs are simply discarded after the
-size is logged so we can confirm what was actually delivered over each
-channel.
+authenticating with a public key, and allows TCP/IP port forwarding
+so the client can tunnel connections to internal services (Redis,
+nginx) through the compressed SSH transport.
 """
 
 import asyncio
@@ -77,6 +75,18 @@ class PoCServer(asyncssh.SSHServer):
 
     def password_auth_supported(self) -> bool:
         return False
+
+    def connection_requested(
+        self,
+        dest_host: str,
+        dest_port: int,
+        orig_host: str,
+        orig_port: int,
+    ) -> bool:
+        """Allow direct-tcpip channels (local port forwarding)."""
+        LOG.info("direct-tcpip: %s:%d <- %s:%d",
+                 dest_host, dest_port, orig_host, orig_port)
+        return True
 
 
 async def main() -> int:
