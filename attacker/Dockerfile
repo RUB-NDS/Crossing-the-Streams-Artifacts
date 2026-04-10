@@ -13,6 +13,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY mitm.py attack.py ./
+COPY mitm.py attack.py attack_beast.py exploit.html ./
 
 CMD ["python", "/app/mitm.py"]

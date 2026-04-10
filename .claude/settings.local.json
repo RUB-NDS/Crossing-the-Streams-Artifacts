@@ -8,7 +8,8 @@
       "Bash(PYTHONUNBUFFERED=1 python -u scripts/test_attack_random.py)",
       "Bash(mkdir -p /c/Users/Fabian/Workspace/SSH-Compression-PoC/services)",
       "Bash(mkdir -p /c/Users/Fabian/Workspace/SSH-Compression-PoC/webhost)",
-      "Bash(docker exec poc-client:*)"
+      "Bash(docker exec poc-client:*)",
+      "Bash(python scripts/verify_beast.py)"
     ]
   }
 }
