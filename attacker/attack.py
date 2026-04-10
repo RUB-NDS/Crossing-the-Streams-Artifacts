@@ -231,8 +231,8 @@ async def run_attack(
     terminator: bytes = b"\r",
     settle: float = 0.01,
     flush_bytes: int = 33000,
-    min_margin: int = 16,
-    max_rounds: int = 16,
+    min_margin: int = 32,
+    max_rounds: int = 32,
 ) -> dict[str, Any]:
     if noise_lengths is None:
         noise_lengths = list(range(8))

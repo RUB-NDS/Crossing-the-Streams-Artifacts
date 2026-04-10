@@ -286,7 +286,7 @@ docker compose logs -f attacker
 
 Each byte is reported with a
 `pos N round=R best=X sum=S 2nd=Y sum=T margin=M` line.  The attack
-repeats rounds until `margin >= 16`, ensuring every byte is confirmed
+repeats rounds until `margin >= 32`, ensuring every byte is confirmed
 by a clear signal before being committed.
 
 ## How the attack works
@@ -317,7 +317,7 @@ terminator = `\r`.  Recovers e.g. `hunter2`.
 For each byte position, the attack sweeps 8 noise lengths (0..7)
 per **round** and accumulates candidate wire-byte sums across
 rounds.  After each round the *margin* (difference between best and
-second-best sum) is checked.  If `margin >= 16` the byte is
+second-best sum) is checked.  If `margin >= 32` the byte is
 resolved; otherwise another round is run with fresh tunnel
 connections whose SSH `CHANNEL_OPEN` bit-alignment jitter is
 independent of previous rounds.  The real compression signal
@@ -428,7 +428,7 @@ originator port varies).  A single 8-noise-length sweep may land
 entirely in one chacha20 padding bin, giving margin = 0.  Repeating
 rounds with independent jitter lets the signal accumulate while the
 noise averages out.  The attack commits a byte only when
-`margin >= 16` (configurable via `min_margin`).
+`margin >= 32` (configurable via `min_margin`).
 
 ### 4. AsyncSSH `Z_SYNC_FLUSH` -> `Z_PARTIAL_FLUSH`
 
@@ -474,7 +474,7 @@ rounds per byte position depending on alignment jitter).
 Roughly 30-60 seconds per recovered byte with the default settings.
 Per byte position the attack performs
 `8 noise lengths x (alphabet + 1) candidates x 3 SSH messages`
-per round, with 1-5 rounds per position to reach `margin >= 16`.
+per round, with 1-5 rounds per position to reach `margin >= 32`.
 The HTTP round-trip to the client control API is the dominant
 bottleneck.
 
@@ -551,8 +551,8 @@ SSH-Compression-PoC/
   "noise_lengths":  [0,1,2,3,4,5,6,7],
   "settle":         0.01,
   "flush_bytes":    33000,
-  "min_margin":     16,
-  "max_rounds":     16
+  "min_margin":     32,
+  "max_rounds":     32
 }
 ```
 
@@ -567,8 +567,7 @@ SSH-Compression-PoC/
   by default.
 - **Two-phase attack.** Because redis-py uses RESP wire format, the
   password length is encoded before the password.  The attack first
-  recovers the length digits, then the password.  The attacker must
-  know the client uses redis-py and the `default` ACL user.
+  recovers the length digits, then the password.
 - **Alphabet and prefix knowledge matter.** The PoC assumes
   `[a-z0-9]` passwords and a known RESP prefix.  A binary secret
   with no known structure would need a much larger alphabet.
@@ -586,6 +585,73 @@ SSH-Compression-PoC/
   wider noise sweep but does not fundamentally change the attack.
 - **Redis CONFIG SET.** The test harness changes the Redis password
   at runtime via `CONFIG SET requirepass`.
+
+## zlib 1.3 and the `min_margin` threshold
+
+zlib 1.3 (shipped with Python 3.13+) redesigned the internal hash
+function used for LZ77 match finding.  The compression oracle is
+**unaffected** -- the correct candidate still compresses to exactly
+1 fewer byte -- but the changed hash function shifts the bit alignment
+of the compressed stream in a way that amplifies per-round measurement
+noise, requiring a higher `min_margin` threshold for reliable recovery.
+
+### Background: the signal chain
+
+The attack's measurement captures a TCP segment containing **two** SSH
+binary packets: a `MSG_IGNORE` (AsyncSSH inserts one before every
+`CHANNEL_DATA`) and the guess `CHANNEL_DATA` itself.  Both pass
+through the shared c->s compressor.  With chacha20-poly1305's 8-byte
+padding, each packet's wire size is quantised to 8-byte bins.
+
+Over 8 noise lengths, the 1-byte compression delta produces a
+deterministic margin of **exactly 8 wire bytes per round**: correct
+and wrong candidates each have exactly one padding-boundary crossing,
+but at adjacent noise lengths, so the correct candidate's sum is
+always 8 bytes smaller.
+
+### What zlib 1.3 changes
+
+Each attack iteration uses a fresh 33 KiB random flush whose
+compressed output fills the LZ77 sliding window.  The bit position
+after the flush's `Z_PARTIAL_FLUSH` is the starting alignment for all
+subsequent packets in that iteration.
+
+With zlib 1.2's hash function the compressed size of random data was
+highly stable across different random inputs -- the bit position after
+the flush varied by at most a few bits.  This meant the `MSG_IGNORE`
+wire size was **the same** for all candidates within a round,
+contributing zero noise to the margin.
+
+zlib 1.3's better-distributing hash function makes the compressed
+output for random data **more variable** in total byte count.  The
+resulting bit-position drift propagates through the chain of
+`Z_PARTIAL_FLUSH` boundaries (each adding 17 overhead bits that round
+differently depending on the starting position), so by the time the
+`MSG_IGNORE` before the guess is compressed, the bit alignment can
+differ enough between candidates to push the `MSG_IGNORE` wire size
+across an 8-byte padding boundary for some candidates but not others.
+
+This turns the `MSG_IGNORE` wire size into a **random +/-8 byte**
+offset per candidate.  The per-round margin becomes
+`8 (signal) + noise`, where `noise in {-8, 0, +8}`.  A wrong
+candidate can hit margin = 16 in a single round by chance (its
+`MSG_IGNORE` lands in a smaller bin), while the correct candidate's
+`MSG_IGNORE` lands in a larger bin and cancels out its signal.
+
+### Why increasing `min_margin` fixes it
+
+The guess signal accumulates linearly (8 bytes/round) while the
+`MSG_IGNORE` jitter grows as sqrt(rounds).  After *N* rounds the
+expected margin is `8N` with standard deviation ~`4*sqrt(N)`.  Setting
+`min_margin = 32` (the current default) forces at least ~4 rounds
+before committing.  At that point a false positive requires
+~4 standard deviations of accumulated noise -- probability < 0.03%
+across all candidates -- making the attack reliable on both
+zlib 1.2 and 1.3.
+
+The trade-off is throughput: each byte position now takes 2-4x more
+rounds on average (~60-120 s/byte vs. ~30-60 s/byte with the old
+threshold of 16).
 
 ## Mitigations
 

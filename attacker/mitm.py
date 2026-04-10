@@ -237,8 +237,8 @@ async def handle_run_attack(request: web.Request) -> web.Response:
     noise_lengths = body.get("noise_lengths") or list(range(8))
     settle = float(body.get("settle", 0.01))
     flush_bytes = int(body.get("flush_bytes", 33000))
-    min_margin = int(body.get("min_margin", 16))
-    max_rounds = int(body.get("max_rounds", 16))
+    min_margin = int(body.get("min_margin", 32))
+    max_rounds = int(body.get("max_rounds", 32))
 
     LOG.info("HTTP /run_attack: prefix=%r alphabet_size=%d max=%d "
              "min_margin=%d max_rounds=%d",
