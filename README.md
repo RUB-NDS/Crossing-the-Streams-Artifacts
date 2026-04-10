@@ -5,9 +5,15 @@ chosen-payload compression side-channel attack against the SSH binary
 packet protocol.  A passive on-path observer recovers the Redis
 password that the victim's application sends through an SSH tunnel, by
 abusing the fact that all SSH port-forwarded channels in one direction
-share a single zlib compression context, and by injecting chosen
-payloads through the same tunnel whose local endpoint is accessible on
-the network.
+share a single zlib compression context.
+
+Two attack variants are implemented:
+
+- **Direct** -- the attacker injects data by opening TCP connections
+  to the victim's exposed tunnel endpoint.
+- **BEAST** -- the victim visits an attacker-controlled website whose
+  JavaScript injects data via `navigator.sendBeacon()` to `localhost`.
+  A headless Chromium browser is automated with Playwright.
 
 > **Status: research / educational PoC.** This attack assumes a
 > *strong* adversary (see [Threat model](#threat-model)) and is not
@@ -22,13 +28,14 @@ the network.
 3. [Architecture](#architecture)
 4. [Quick start](#quick-start)
 5. [How the attack works](#how-the-attack-works)
-6. [Three non-obvious knobs](#three-non-obvious-knobs)
-7. [Results](#results)
-8. [Repository layout](#repository-layout)
-9. [HTTP control surface](#http-control-surface)
-10. [Limitations and caveats](#limitations-and-caveats)
-11. [Mitigations](#mitigations)
-12. [References](#references)
+6. [Attack variants](#attack-variants)
+7. [Three non-obvious knobs](#three-non-obvious-knobs)
+8. [Results](#results)
+9. [Repository layout](#repository-layout)
+10. [HTTP control surface](#http-control-surface)
+11. [Limitations and caveats](#limitations-and-caveats)
+12. [Mitigations](#mitigations)
+13. [References](#references)
 
 ## Background
 
@@ -72,14 +79,11 @@ Redis instance through the tunnel.  The developer's application
 authenticates to Redis with `AUTH default <password>` through the
 same tunnel.
 
-An attacker on the same network segment connects to the tunnel on
-port 6379 and sends chosen bytes.  Those bytes enter the SSH tunnel
-as `direct-tcpip` channel data, sharing the c->s zlib compression
-context with the victim's Redis AUTH traffic.  By observing
-encrypted packet sizes on the wire, the attacker recovers the Redis
+An attacker on the same network segment can recover the Redis
 password byte by byte -- without ever breaking SSH crypto, without
 shell access to the victim's machine, and without the victim's
-credentials.
+credentials -- by injecting chosen data through the same tunnel and
+observing encrypted packet sizes on the wire.
 
 The client uses **redis-py** (`redis.asyncio`) for all Redis
 interactions, so the `AUTH` command is sent in standard RESP wire
@@ -106,13 +110,11 @@ hold:
    tunnel to `0.0.0.0` (or a routable address) so other hosts on the
    LAN can reach it.  This is common when the developer wants
    containers, VMs, or colleagues to access the tunneled service.
-   The attacker, on the same network segment, connects to this
-   endpoint and sends chosen bytes which enter the SSH tunnel as
-   `direct-tcpip` channel data.
-3. **Attacker-injected and secret data share one zlib context.**
-   The attacker's connections and the victim's application traffic
-   both traverse the same SSH connection, so they share one c->s
-   zlib compression context.
+3. **Attacker can inject data into the shared compression context.**
+   In the *direct* variant the attacker connects to the exposed
+   tunnel endpoint from the network.  In the *BEAST* variant the
+   victim visits an attacker-controlled website whose JavaScript
+   makes requests to `localhost:6379` via `navigator.sendBeacon()`.
 4. **Passive on-path observer.** The attacker sees ciphertext lengths
    on the wire. In the PoC the attacker is a TCP forwarder that the
    client connects to (so it sees every byte of every TCP segment
@@ -151,8 +153,9 @@ breaks SSH crypto and never modifies SSH traffic.
 |poc-client| ---> |   poc-attacker   | ---> | poc-server  |
 |OpenSSH   | TCP  |  TCP forwarder   | TCP  | OpenSSH     |
 |+redis-py | :2222|  +scapy sniffer  | :22  | sshd        |
-|+aiohttp  |      |  +aiohttp :9000  |      |             |
-|:8000 ctrl|      +--+---------------+      +-------------+
+|+Chromium |      |  +aiohttp :9000  |      |             |
+|+aiohttp  |      +--+---------------+      +-------------+
+|:8000 ctrl|         |
 +----------+         |
  :6379 <-------------+  attacker injects through exposed tunnel
 ```
@@ -184,6 +187,12 @@ Five long-lived containers + a one-shot keygen container:
   `username='default'`.  An aiohttp HTTP control API on port 8000
   lets the test harness trigger a Redis AUTH cycle (`/send_secret`),
   change the password (`/set_secret`), and reconnect SSH (`/reset`).
+
+  For the BEAST variant the client also launches a **headless
+  Chromium** browser (via Playwright) that navigates to an exploit
+  page served from `localhost:8000/exploit`.  The page's JavaScript
+  connects to the attacker via WebSocket and executes
+  `navigator.sendBeacon()` requests to `localhost:6379` on command.
 - **`poc-attacker`** -- Three jobs in one container:
   1. A passive **TCP forwarder** between `:2222` and `server:22`.  It
      never terminates, decrypts, or modifies SSH.
@@ -191,15 +200,11 @@ Five long-lived containers + a one-shot keygen container:
      `tcp and (port 22 or port 2222)` that records the size of every
      TCP segment in both directions.
   3. An **aiohttp control API** on port 9000 with `/run_attack`
-     (start the actual chosen-payload attack and return the
-     recovered secret) plus `/packet_log`, `/clear_log`,
-     `/trigger_secret`, `/trigger_payload`, `/status` for
-     instrumentation.
-
-  The attack injects payloads by opening TCP connections to
-  `client:6379` (the exposed Redis tunnel).  This data enters
-  the SSH tunnel as `direct-tcpip` channel data, sharing the c->s
-  compression context with the victim's Redis AUTH traffic.
+     (direct variant), `/run_attack_beast` (BEAST variant), plus
+     `/packet_log`, `/clear_log`, `/trigger_secret`,
+     `/trigger_payload`, `/status` for instrumentation.  For the
+     BEAST variant: `/exploit` serves the exploit page and `/ws`
+     handles the WebSocket connection from the browser.
 
 The Docker bridge network (`sshpoc`) is the entire network the
 attack lives on.  Container hostnames (`server`, `attacker`,
@@ -222,53 +227,11 @@ docker compose up -d --build
 #    attacker can observe wire sizes and inject through the tunnel):
 python scripts/verify.py
 
-# 3. Run the attack against the five canonical regression secrets:
+# 3. Run the direct attack variant against hunter2:
 python scripts/test_attack.py
 
-# 4. (Optional) Stress-test against 50 random secrets of varying
-#    length:
-python scripts/test_attack_random.py
-```
-
-Expected output of step 3:
-
-```
-expected         recovered        time       status
----------------- ---------------- ---------- ------
-hunter2          hunter2           259.5s    PASS
-correcthorse     correcthorse      ...       PASS
-pa55word         pa55word          ...       PASS
-letmein9         letmein9          ...       PASS
-tr0ub4dor        tr0ub4dor         ...       PASS
-
-5/5 tests passed
-```
-
-To attack a single secret of your own:
-
-```bash
-# Set the Redis password on the client (this also reconfigures the
-# real Redis server via CONFIG SET and reconnects SSH so the LZ77
-# window is clean)
-curl -X POST http://127.0.0.1:8000/set_secret \
-     -H 'Content-Type: application/json' \
-     -d '{"value":"my-secret-here"}'
-
-# Kick off the attack.  Phase 1 recovers the RESP password length,
-# phase 2 recovers the password itself.
-# Phase 1 (recover password length):
-curl -X POST http://127.0.0.1:9000/run_attack \
-     -H 'Content-Type: application/json' \
-     -d '{"known_prefix":"*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$",
-          "alphabet":"0123456789",
-          "max_length":4}'
-
-# Phase 2 (recover password, using the length from phase 1):
-curl -X POST http://127.0.0.1:9000/run_attack \
-     -H 'Content-Type: application/json' \
-     -d '{"known_prefix":"*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$7\r\n",
-          "alphabet":"abcdefghijklmnopqrstuvwxyz0123456789",
-          "max_length":12}'
+# 4. Run the BEAST attack variant against hunter2:
+python scripts/verify_beast.py
 ```
 
 While an attack is running, watch progress in the attacker logs:
@@ -278,9 +241,7 @@ docker compose logs -f attacker
 ```
 
 Each byte is reported with a
-`pos N round=R best=X sum=S 2nd=Y sum=T margin=M` line.  The attack
-repeats rounds until `margin >= 16`, ensuring every byte is confirmed
-by a clear signal before being committed.
+`pos N round=R best=X sum=S 2nd=Y sum=T margin=M` line.
 
 ## How the attack works
 
@@ -305,92 +266,27 @@ terminator = `\r`.  Recovers e.g. `7`.
 recovered length and `\r\n` delimiter), alphabet = `a-z0-9`,
 terminator = `\r`.  Recovers e.g. `hunter2`.
 
+### Constant-length prefix trimming
+
+As each password byte is recovered, it is appended to the known
+prefix and the first byte of the prefix is trimmed, keeping
+`len(prefix + candidate)` constant across all positions.  This
+ensures the LZ77 match length stays in the same DEFLATE length-code
+bin at every position, avoiding the 8-to-7-bit signal drop that
+occurs at code boundaries (e.g. match lengths 34 -> 35 cross from
+code 272 to code 273).
+
 ### Per-byte recovery with repeat-until-confident
 
 For each byte position, the attack sweeps 8 noise lengths (0..7)
 per **round** and accumulates candidate wire-byte sums across
 rounds.  After each round the *margin* (difference between best and
-second-best sum) is checked.  If `margin >= 16` the byte is
-resolved; otherwise another round is run with fresh tunnel
-connections whose SSH `CHANNEL_OPEN` bit-alignment jitter is
+second-best sum) is checked.  If the margin exceeds the threshold
+the byte is resolved; otherwise another round is run with fresh
+tunnel connections whose SSH `CHANNEL_OPEN` bit-alignment jitter is
 independent of previous rounds.  The real compression signal
 (7-8 bits per correct candidate) grows linearly with rounds while
 the jitter averages out.
-
-Four progressive optimisations reduce work:
-
-- **Candidate elimination.** After each round, candidates whose
-  cumulative sum exceeds the best candidate's sum by more than
-  `min_margin` are dropped.  Wrong candidates never compress
-  smaller than the correct one, so their deficit is permanent;
-  the minimum candidate count is clamped to 2 so the margin
-  remains meaningful.
-- **Adaptive noise sweep.** After the first full noise sweep,
-  noise lengths that showed no differential signal (identical
-  wire sizes for all candidates) are pruned.  Only productive
-  noise lengths and their +/-1 neighbours are kept, reducing the
-  per-round work from 8 to typically 3-5 noise lengths.
-- **Noise hint carry-over.** The productive noise lengths from
-  the previous byte position are shifted by +1 mod 8 (the prefix
-  grew by one byte, so the padding-boundary crossing moves one
-  noise length) and used as the initial noise set for the next
-  position.  This often hits the productive region on round 1,
-  avoiding an expensive full sweep.
-- **Stall detection.** If the margin fails to grow for 2
-  consecutive rounds and no candidates were eliminated, the active
-  noise set is expanded by +/-1 (mod 8) to recover crossing lengths
-  lost to channel jitter.
-
-Within each round, for each `(candidate, noise_length)`:
-
-```
-1. flush_window()         -- open a throwaway tunnel connection and
-                             send 33 KB of RANDOM bytes to evict
-                             prior guesses from the LZ77 window
-2. open_measure_tunnel()  -- open the measurement tunnel connection
-                             BEFORE the secret so its CHANNEL_OPEN
-                             lands on the far side of the secret in
-                             the LZ77 window
-3. refresh_secret()       -- trigger redis-py to connect and AUTH
-                             through the tunnel, placing the secret
-                             at the most-recent end of the LZ77
-                             dictionary
-4. measure(prefix +       -- clear the packet log, send the candidate
-           candidate +       guess on the measurement tunnel, sum the
-           noise)            c->s TCP payload bytes that scapy captured
-```
-
-The candidate with the smallest accumulated sum across all rounds
-is the recovered byte.
-
-### Why each step is there
-
-**`flush_window`.** Two jobs in one:
-
-- **LZ77 window eviction.** Pushing >= 32 KiB of random data through
-  the tunnel evicts prior guesses past the 32 KiB window edge.
-  Without this, the new guess back-references the previous guess and
-  there is no signal.
-- **zlib hash-chain stabilisation.** **Random bytes** keep every hash
-  chain short so zlib finds the optimal match.  An all-zeros flush
-  saturates the `\x00\x00\x00` hash chain and produces sub-optimal,
-  state-dependent compression.
-
-**`open_measure_tunnel` before `refresh_secret`.** The measurement
-tunnel's `CHANNEL_OPEN` goes through the c->s compressor.  By opening
-it *before* the Redis AUTH, the `CHANNEL_OPEN` lands in the LZ77
-window on the far side of the secret, leaving **zero** channel-
-management bytes between the AUTH data and the upcoming guess.
-
-**`refresh_secret`.** The client opens a new Redis connection through
-the tunnel using redis-py.  redis-py sends `AUTH default <password>`
-in RESP format.  This creates a fresh `direct-tcpip` channel whose
-data passes through the shared c->s compressor.
-
-**`measure`.** Sends the guess through the measurement tunnel and sums
-the c->s TCP payload bytes.  Both the Redis AUTH and the guess are
-`direct-tcpip` channels on the same SSH connection, sharing one zlib
-context.
 
 ### Where the signal lives
 
@@ -411,6 +307,75 @@ any wrong one.  The wire-side packet length only changes when this
 delta crosses a chacha20-poly1305@openssh.com 8-byte padding
 boundary -- which is why the noise sweep exists.
 
+## Attack variants
+
+### Direct (port-forward injection)
+
+The attacker opens raw TCP connections to `client:6379` (the exposed
+Redis tunnel) and writes the chosen payload directly.  Each connection
+creates a `direct-tcpip` SSH channel sharing the c->s zlib context
+with the victim's Redis AUTH traffic.
+
+Within each round, for each `(candidate, noise_length)`:
+
+```
+1. flush         -- throwaway connection, 33 KB random bytes to
+                    evict prior guesses from the LZ77 window
+2. open_measure  -- open the measurement connection BEFORE the
+                    secret so its CHANNEL_OPEN lands on the far
+                    side of the secret in the LZ77 window
+3. secret        -- trigger Redis AUTH
+4. measure       -- send the guess on the measurement connection,
+                    observe wire size
+```
+
+Default `min_margin = 16`.  Recovers `hunter2` in ~2 minutes.
+
+Four optimisations reduce work in this variant:
+
+- **Candidate elimination** -- wrong candidates are dropped once
+  their deficit exceeds `min_margin`.
+- **Adaptive noise sweep** -- unproductive noise lengths are pruned.
+- **Noise hint carry-over** -- the productive noise set from the
+  previous position is shifted by +1 mod 8 and reused.
+- **Stall detection** -- if the margin stalls, the noise set is
+  expanded by +/-1.
+
+### BEAST (browser-based injection)
+
+The victim's browser visits an attacker-controlled page whose
+JavaScript executes `navigator.sendBeacon('http://localhost:6379',
+...)` to inject data through the SSH tunnel.  The attacker
+coordinates the browser via WebSocket.
+
+Key differences from the direct variant:
+
+- **No pre-opened measurement channel.** `sendBeacon()` opens and
+  closes a connection in one shot, so the `CHANNEL_OPEN` and guess
+  data arrive together.  The measurement filters out small segments
+  (< 100 bytes) to isolate the `CHANNEL_DATA` from the
+  `CHANNEL_OPEN` jitter.
+- **High-byte flush (0x80-0xFF).** Random bytes from 0x80-0xFF are
+  used for the flush instead of the full 0x00-0xFF range.  This
+  avoids LZ77 matches between the flush data and the HTTP headers
+  that `sendBeacon()` prepends, keeping header compression
+  deterministic within a round.
+- **Round-level outlier detection.** Chrome may reuse TCP connections
+  despite unique URLs, causing ~400-byte measurement anomalies.
+  After each round, if `max - min > 32 bytes` across all
+  measurements, the entire round is discarded and re-run.
+- **No adaptive noise.** The HTTP header overhead makes noise
+  pruning unreliable, so all 8 noise lengths are swept every round.
+- **Higher margin threshold.** Default `min_margin = 64` to
+  compensate for the noisier browser-based measurements.
+
+The exploit page is served from `localhost:8000/exploit` (the
+client's own HTTP API) so that `sendBeacon()` to `localhost:6379` is
+a local-to-local request, avoiding Chrome's Private Network Access
+restrictions without browser flags.
+
+Recovers `hunter2` in ~20 minutes.
+
 ## Three non-obvious knobs
 
 ### 1. `flush_bytes` >= 32 KiB and random content
@@ -426,7 +391,9 @@ The data has already passed through the SSH compressor.
 **Random content is critical.** An all-zeros flush saturates zlib's
 hash chain for `\x00\x00\x00`; at level 6 the match search gives up
 after 128 chain entries and produces sub-optimal compression.
-Cryptographically random bytes keep every chain short.
+Cryptographically random bytes keep every chain short.  In the BEAST
+variant, the flush is restricted to 0x80-0xFF to avoid LZ77 matches
+against HTTP header content.
 
 ### 2. Noise bytes: 8-bit DEFLATE literals (0x80..0x8F)
 
@@ -444,12 +411,12 @@ bit-alignment jitter from the SSH `CHANNEL_OPEN` message (its
 originator port varies).  A single 8-noise-length sweep may land
 entirely in one chacha20 padding bin, giving margin = 0.  Repeating
 rounds with independent jitter lets the signal accumulate while the
-noise averages out.  The attack commits a byte only when
-`margin >= 16` (configurable via `min_margin`).
+noise averages out.  The attack commits a byte only when the margin
+exceeds the configured threshold (`min_margin`).
 
 ## Results
 
-### Single-secret benchmark (hunter2)
+### Direct variant -- hunter2
 
 ```
 Phase 1: recovering password length...
@@ -463,15 +430,30 @@ Total:     259.5s
 Status:    PASS
 ```
 
-### Throughput
+### BEAST variant -- hunter2
 
-Roughly 20-40 seconds per recovered byte with the default settings.
-Per byte position the attack performs
-`N_noise x (alive_candidates + 1) x 3 SSH messages`
-per round, where `N_noise` starts at 8 but is typically pruned to
-3-5 after the first round, and candidates are progressively
-eliminated.  Most byte positions resolve in 1-3 rounds at
-`min_margin >= 16`.
+```
+Phase 1: recovering password length...
+  length = 7 (108.3s)
+Phase 2: recovering password...
+  password = 'hunter2' (1116.0s)
+
+Expected:  hunter2
+Recovered: hunter2
+Total:     1224.3s
+Status:    PASS
+```
+
+### Throughput comparison
+
+| Variant | min_margin | ~Time/byte | hunter2 total |
+|---------|-----------|------------|---------------|
+| Direct  | 16        | 20-40s     | ~4 min        |
+| BEAST   | 64        | 60-180s    | ~20 min       |
+
+The BEAST variant is slower due to HTTP header overhead, outlier
+retries, and the higher margin threshold needed to compensate for
+browser-introduced noise.
 
 ## Repository layout
 
@@ -484,8 +466,9 @@ SSH-Compression-PoC/
 |                                 Kelsey 2002, RFCs 4250-4254, 1950, 1951
 +-- scripts/
 |   +-- keygen.sh              -- one-shot key generator (ssh-keygen)
-|   +-- verify.py              -- environment smoke test (no attack)
-|   +-- test_attack.py         -- 5-secret regression suite (two-phase RESP)
+|   +-- verify.py              -- environment smoke test (direct variant)
+|   +-- verify_beast.py        -- BEAST variant smoke test + hunter2 attack
+|   +-- test_attack.py         -- 5-secret regression suite (direct variant)
 |   +-- test_attack_random.py  -- 50-random-secret stress test
 +-- server/
 |   +-- Dockerfile             -- debian:bookworm-slim + openssh-server
@@ -494,17 +477,18 @@ SSH-Compression-PoC/
 |   +-- entrypoint.sh          -- copies host key, sets up authorized_keys,
 |                                 runs sshd -D -e
 +-- client/
-|   +-- Dockerfile             -- python:3.14-slim + openssh-client
-|   +-- requirements.txt       -- aiohttp, redis
+|   +-- Dockerfile             -- python:3.14-slim + openssh-client + Chromium
+|   +-- requirements.txt       -- aiohttp, redis, playwright
 |   +-- client.py              -- manages OpenSSH subprocess (ssh -N -C)
 |                                 with one local port forward + redis-py
-|                                 + HTTP control plane
+|                                 + HTTP control plane + Chromium browser
 +-- attacker/
     +-- Dockerfile
     +-- requirements.txt       -- scapy, aiohttp
     +-- mitm.py                -- TCP forwarder + scapy sniffer + control API
-    +-- attack.py              -- the chosen-payload attack (injects through
-                                  the Redis tunnel, observes Redis AUTH)
+    +-- attack.py              -- direct attack variant (raw TCP injection)
+    +-- attack_beast.py        -- BEAST attack variant (browser injection)
+    +-- exploit.html            -- attacker's exploit page (JS + WebSocket)
 ```
 
 ## HTTP control surface
@@ -513,21 +497,25 @@ SSH-Compression-PoC/
 
 | Method | Path                       | Description |
 |--------|----------------------------|-------------|
-| GET    | `/status`                  | Connection state, negotiated algs, port-forward state |
+| GET    | `/status`                  | Connection state, negotiated algs, port-forward state, browser state |
+| GET    | `/exploit`                 | Serves the BEAST exploit page (JS that connects to attacker via WebSocket) |
 | POST   | `/send_secret`             | Opens a fresh redis-py connection through the tunnel; redis-py sends `AUTH default <password>` in RESP format |
 | POST   | `/set_secret`              | JSON `{"value": "..."}` -- reconfigures the real Redis password via `CONFIG SET`, then reconnects SSH |
 | POST   | `/reset`                   | Tear down and re-open the SSH connection |
 
 ### Attacker (`http://localhost:9000`)
 
-| Method | Path                | Description |
-|--------|---------------------|-------------|
-| GET    | `/status`           | Forwarder + sniffer state |
-| GET    | `/packet_log`       | scapy-captured TCP segments since last clear |
-| POST   | `/clear_log`        | Reset the packet log |
-| POST   | `/trigger_secret`   | Convenience: forwards to client `/send_secret` |
-| POST   | `/trigger_payload`  | Sends payload through the Redis tunnel (TCP to client:6379) |
-| POST   | `/run_attack`       | JSON parameters; runs the attack and returns the recovered value + per-position history |
+| Method | Path                  | Description |
+|--------|-----------------------|-------------|
+| GET    | `/status`             | Forwarder + sniffer state + browser connection status |
+| GET    | `/packet_log`         | scapy-captured TCP segments since last clear |
+| POST   | `/clear_log`          | Reset the packet log |
+| POST   | `/trigger_secret`     | Convenience: forwards to client `/send_secret` |
+| POST   | `/trigger_payload`    | Sends payload through the Redis tunnel (TCP to client:6379) |
+| GET    | `/exploit`            | Serves the BEAST exploit page |
+| GET    | `/ws`                 | WebSocket endpoint for browser communication |
+| POST   | `/run_attack`         | Direct attack variant |
+| POST   | `/run_attack_beast`   | BEAST attack variant |
 
 `/run_attack` body fields (all optional, with shown defaults):
 
@@ -544,13 +532,15 @@ SSH-Compression-PoC/
 }
 ```
 
+`/run_attack_beast` accepts the same fields with different defaults:
+`settle = 0.01`, `min_margin = 64`.
+
 ## Limitations and caveats
 
 - **Strong adversary required.** See [Threat model](#threat-model).
   This is not "you can read Redis passwords off the wire".  The
-  attacker needs (a) an on-path observation point and (b) access to
-  a network-bound port-forward endpoint on the same SSH connection
-  that carries the secret.
+  attacker needs (a) an on-path observation point and (b) a way to
+  inject data into the shared compression context.
 - **Compression must be enabled.** OpenSSH's `Compression` is `no`
   by default.
 - **Two-phase attack.** Because redis-py uses RESP wire format, the
@@ -559,17 +549,24 @@ SSH-Compression-PoC/
 - **Alphabet and prefix knowledge matter.** The PoC assumes
   `[a-z0-9]` passwords and a known RESP prefix.  A binary secret
   with no known structure would need a much larger alphabet.
-- **Throughput is bounded by HTTP round-trips, not SSH.** Each guess
-  sends a ~33 KiB dummy flush through the tunnel, plus HTTP
-  round-trips to the client's control API.
+- **BEAST variant: HTTP header noise.** The browser's HTTP headers
+  (~500 bytes) enter the compressor alongside the guess body.
+  Substrings shared between the headers and the RESP prefix (e.g.
+  `\r\n` sequences) can create false LZ77 matches that reduce the
+  signal at certain byte positions.  The higher `min_margin` and
+  outlier detection compensate for this.
+- **BEAST variant: connection reuse.** Chrome may reuse TCP
+  connections to `localhost:6379` across consecutive `sendBeacon()`
+  calls.  When this happens, the second request's HTTP headers
+  backreference the first request's headers, producing a ~400-byte
+  measurement anomaly.  The round-level outlier guard detects and
+  discards these rounds.
 - **Tested against OpenSSH.** Both client and server use the
   standard OpenSSH implementation.  Other SSH implementations
   (libssh, PuTTY, ...) may differ in `MSG_IGNORE` injection,
   default zlib level, write-splitting, and channel-data
   fragmentation, all of which affect the precise numbers though not
-  the underlying signal.  In particular, implementations that inject
-  `MSG_IGNORE` packets before every `CHANNEL_DATA` (as AsyncSSH
-  does) add measurement noise that requires a higher `min_margin`.
+  the underlying signal.
 - **chacha20-poly1305@openssh.com.** The wire-side analysis is
   specific to chacha20-poly1305's 8-byte padding granularity.
   AES-CTR + HMAC-ETM uses a 16-byte boundary which would require a
@@ -587,7 +584,8 @@ SSH-Compression-PoC/
   Requires a protocol extension to RFC 4253 section 6.2.
 - **Don't bind port forwards to 0.0.0.0.** Binding to `127.0.0.1`
   (the default for OpenSSH's `-L`) prevents remote hosts from
-  reaching the tunnel endpoint.
+  reaching the tunnel endpoint.  This does not prevent the BEAST
+  variant, which injects from the victim's own browser.
 - **Length-hiding padding.** Random padding amounts in SSH binary
   packets (RFC 4253 permits up to 255 bytes) would hide the
   compressed-size signal.  No implementation enables this by
