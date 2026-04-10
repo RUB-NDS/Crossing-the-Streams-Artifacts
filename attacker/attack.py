@@ -242,7 +242,7 @@ async def run_attack(
     max_length: int = 32,
     noise_lengths: list[int] | None = None,
     terminator: bytes = b"\r",
-    settle: float = 0.01,
+    settle: float = 0.003,
     flush_bytes: int = 33000,
     min_margin: int = 16,
     max_rounds: int = 16,
