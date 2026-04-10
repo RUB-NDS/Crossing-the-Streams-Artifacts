@@ -1,0 +1,25 @@
+Port 22
+AddressFamily inet
+ListenAddress 0.0.0.0
+
+# Force compression -- both zlib and zlib@openssh.com.
+# The client connects with -C so the negotiation picks zlib@openssh.com.
+Compression yes
+
+# Host key (copied from /keys volume at container start)
+HostKey /etc/ssh/server_host_key
+
+# Authentication
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+AuthenticationMethods publickey
+PermitRootLogin no
+AllowUsers victim
+
+# Port forwarding -- allow direct-tcpip (local forwarding from client)
+AllowTcpForwarding yes
+GatewayPorts no
+
+# Logging
+LogLevel INFO

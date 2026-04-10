@@ -6,14 +6,14 @@ services:
   # Other services depend on this completing successfully.
   # ----------------------------------------------------------------------
   keygen:
-    build:                   # reuse server image (asyncssh already installed)
+    build:                   # reuse server image (has ssh-keygen)
       context: .
       dockerfile: server/Dockerfile
     container_name: poc-keygen
     volumes:
       - ./keys:/keys
       - ./scripts:/scripts:ro
-    command: ["python", "/scripts/keygen.py"]
+    command: ["/bin/sh", "/scripts/keygen.sh"]
     networks:
       - sshpoc
 
@@ -62,8 +62,6 @@ services:
         condition: service_started
     volumes:
       - ./keys:/keys:ro
-    environment:
-      - PYTHONUNBUFFERED=1
     networks:
       - sshpoc
 

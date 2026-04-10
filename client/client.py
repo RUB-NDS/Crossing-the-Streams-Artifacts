@@ -1,9 +1,9 @@
-"""SSH client -- port-forwarding variant of the CRIME-on-SSH PoC.
+"""SSH client -- OpenSSH subprocess variant of the CRIME-on-SSH PoC.
 
 Scenario
 --------
 The victim tunnels two internal services through **one** compressed SSH
-connection:
+connection (``ssh -C``):
 
 * **Redis** (127.0.0.1:6379 -> redis:6379) -- the victim's application
   authenticates with ``AUTH <password>`` on every new connection.  The
@@ -26,8 +26,6 @@ endpoints that reveal the secret):
     POST /set_secret           -- change the secret, reconfigure Redis,
                                   and reconnect SSH
     POST /reset                -- reconnect SSH
-    GET  /compressed_log       -- debug-only compressor output sizes
-    POST /clear_compressed_log -- clear the debug log
 """
 
 import asyncio
@@ -36,7 +34,6 @@ import os
 import sys
 from typing import Optional
 
-import asyncssh
 import redis.asyncio as aioredis
 from aiohttp import web
 
@@ -69,8 +66,7 @@ REDIS_TUNNEL_DEST_PORT = int(os.environ.get("REDIS_TUNNEL_DEST_PORT", "6379"))
 
 DEFAULT_SECRET_VALUE = os.environ.get("SECRET_VALUE", "hunter2")
 
-COMPRESSION_ALGS = ["zlib@openssh.com", "zlib"]
-
+KNOWN_HOSTS_PATH = "/tmp/known_hosts"
 
 # Redis username used for ACL-style AUTH (Redis 6+).
 # redis-py sends ``AUTH default <password>`` in RESP format.
@@ -78,88 +74,162 @@ REDIS_USERNAME = "default"
 
 
 # ---------------------------------------------------------------------------
-# SSH + port-forward state
+# SSH subprocess state
 # ---------------------------------------------------------------------------
 
 class SSHState:
-    """Manages the SSH connection and its two local port-forward listeners."""
+    """Manages the OpenSSH client subprocess and its two local port forwards."""
 
     def __init__(self, secret_value: str) -> None:
-        self.conn: Optional[asyncssh.SSHClientConnection] = None
-        self.web_listener: Optional[asyncssh.SSHListener] = None
-        self.redis_listener: Optional[asyncssh.SSHListener] = None
+        self.ssh_proc: Optional[asyncio.subprocess.Process] = None
         self.secret_value: str = secret_value
         self._lock = asyncio.Lock()
-        self.compressed_log: list[tuple] = []
+        self._negotiated: dict[str, str] = {}
+        self._stderr_task: Optional[asyncio.Task] = None
+
+    # -- SSH lifecycle --------------------------------------------------------
+
+    def _write_known_hosts(self) -> None:
+        """Build a known_hosts file from the server's public key."""
+        with open(SERVER_HOST_KEY_PUB) as f:
+            key_line = f.read().strip()
+        # [host]:port format for non-standard ports
+        entry = f"[{SSH_TARGET_HOST}]:{SSH_TARGET_PORT} {key_line}\n"
+        with open(KNOWN_HOSTS_PATH, "w") as f:
+            f.write(entry)
+        LOG.info("wrote known_hosts: %s", KNOWN_HOSTS_PATH)
+
+    def _build_ssh_cmd(self) -> list[str]:
+        redis_fwd = (
+            f"{REDIS_TUNNEL_LOCAL_HOST}:{REDIS_TUNNEL_LOCAL_PORT}:"
+            f"{REDIS_TUNNEL_DEST_HOST}:{REDIS_TUNNEL_DEST_PORT}"
+        )
+        web_fwd = (
+            f"{WEB_TUNNEL_LOCAL_HOST}:{WEB_TUNNEL_LOCAL_PORT}:"
+            f"{WEB_TUNNEL_DEST_HOST}:{WEB_TUNNEL_DEST_PORT}"
+        )
+        return [
+            "ssh",
+            "-N",                                           # no remote command
+            "-C",                                           # enable compression
+            "-v",                                           # verbose (parse negotiated algs)
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", f"UserKnownHostsFile={KNOWN_HOSTS_PATH}",
+            "-o", "ExitOnForwardFailure=yes",
+            "-o", "ServerAliveInterval=60",
+            "-o", "ServerAliveCountMax=3",
+            "-i", CLIENT_KEY,
+            "-L", redis_fwd,
+            "-L", web_fwd,
+            "-p", str(SSH_TARGET_PORT),
+            f"{SSH_USERNAME}@{SSH_TARGET_HOST}",
+        ]
 
     async def connect(self) -> None:
-        host_key = asyncssh.read_public_key(SERVER_HOST_KEY_PUB)
-        known_hosts = ([host_key], [], [])
-
-        LOG.info("connecting to %s:%d (real server=%s) as %s",
-                 SSH_TARGET_HOST, SSH_TARGET_PORT, SSH_REAL_SERVER, SSH_USERNAME)
-        self.conn = await asyncssh.connect(
-            host=SSH_TARGET_HOST,
-            port=SSH_TARGET_PORT,
-            username=SSH_USERNAME,
-            client_keys=[CLIENT_KEY],
-            known_hosts=known_hosts,
-            compression_algs=COMPRESSION_ALGS,
+        """Launch ssh subprocess with port forwards."""
+        self._write_known_hosts()
+        cmd = self._build_ssh_cmd()
+        LOG.info("launching: %s", " ".join(cmd))
+        self.ssh_proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
-        LOG.info("SSH transport established")
-        send_alg = self.conn.get_extra_info("send_compression")
-        recv_alg = self.conn.get_extra_info("recv_compression")
-        LOG.info("compression: send=%s recv=%s", send_alg, recv_alg)
+        # Parse negotiated algorithms from ssh -v stderr
+        self._negotiated = await self._parse_kex(timeout=15)
+        LOG.info("negotiated: %s", self._negotiated)
+        # Start a background task to drain stderr so the pipe never fills
+        # and blocks the ssh process.
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
+        # Wait for tunnels to accept connections
+        await self._wait_for_tunnels(timeout=15)
+        LOG.info("SSH tunnels ready")
 
-        self.web_listener = await self.conn.forward_local_port(
-            WEB_TUNNEL_LOCAL_HOST, WEB_TUNNEL_LOCAL_PORT,
-            WEB_TUNNEL_DEST_HOST, WEB_TUNNEL_DEST_PORT,
-        )
-        LOG.info("web tunnel: %s:%d -> %s:%d",
-                 WEB_TUNNEL_LOCAL_HOST, WEB_TUNNEL_LOCAL_PORT,
-                 WEB_TUNNEL_DEST_HOST, WEB_TUNNEL_DEST_PORT)
+    async def _drain_stderr(self) -> None:
+        """Read and discard ssh -v stderr to prevent pipe buffer deadlock."""
+        assert self.ssh_proc is not None and self.ssh_proc.stderr is not None
+        try:
+            while True:
+                line = await self.ssh_proc.stderr.readline()
+                if not line:
+                    break
+        except (asyncio.CancelledError, OSError):
+            pass
 
-        self.redis_listener = await self.conn.forward_local_port(
-            REDIS_TUNNEL_LOCAL_HOST, REDIS_TUNNEL_LOCAL_PORT,
-            REDIS_TUNNEL_DEST_HOST, REDIS_TUNNEL_DEST_PORT,
-        )
-        LOG.info("Redis tunnel: %s:%d -> %s:%d",
-                 REDIS_TUNNEL_LOCAL_HOST, REDIS_TUNNEL_LOCAL_PORT,
-                 REDIS_TUNNEL_DEST_HOST, REDIS_TUNNEL_DEST_PORT)
-
-        compressor = self.conn._compressor  # type: ignore[attr-defined]
-        if compressor is not None:
-            orig_compress = compressor.compress
-
-            def wrapped_compress(data: bytes) -> bytes:
-                out = orig_compress(data)
-                msg_type = data[0] if data else -1
-                self.compressed_log.append(
-                    (len(data), len(out), msg_type, data[:32].hex())
+    async def _parse_kex(self, timeout: float = 15) -> dict[str, str]:
+        """Read ssh -v stderr until kex lines appear or authentication completes."""
+        info: dict[str, str] = {}
+        deadline = asyncio.get_event_loop().time() + timeout
+        assert self.ssh_proc is not None
+        assert self.ssh_proc.stderr is not None
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                line_bytes = await asyncio.wait_for(
+                    self.ssh_proc.stderr.readline(), timeout=1.0,
                 )
-                return out
+            except asyncio.TimeoutError:
+                if info:
+                    break
+                continue
+            if not line_bytes:
+                break
+            line = line_bytes.decode("utf-8", errors="replace").strip()
+            LOG.debug("ssh: %s", line)
+            # debug1: kex: server->client cipher: ... compression: ...
+            if "kex: client->server" in line or "kex: server->client" in line:
+                direction = "send" if "client->server" in line else "recv"
+                for field in ("cipher:", "compression:", "MAC:"):
+                    if field in line:
+                        val = line.split(field, 1)[1].strip().split()[0]
+                        key = f"{direction}_{field.rstrip(':')}"
+                        info[key] = val
+            if "Authentication succeeded" in line or "pledge:" in line:
+                break
+        return info
 
-            compressor.compress = wrapped_compress  # type: ignore[method-assign]
-            LOG.info("instrumented send compressor for debug logging")
-        else:
-            LOG.warning("no send compressor (compression disabled?)")
+    async def _wait_for_tunnels(self, timeout: float = 30) -> None:
+        """Poll local ports until both tunnels accept connections."""
+        tunnels = [
+            (REDIS_TUNNEL_LOCAL_HOST, REDIS_TUNNEL_LOCAL_PORT, "redis"),
+            (WEB_TUNNEL_LOCAL_HOST, WEB_TUNNEL_LOCAL_PORT, "web"),
+        ]
+        deadline = asyncio.get_event_loop().time() + timeout
+        for host, port, label in tunnels:
+            while asyncio.get_event_loop().time() < deadline:
+                if self.ssh_proc and self.ssh_proc.returncode is not None:
+                    raise RuntimeError(
+                        f"ssh exited with code {self.ssh_proc.returncode}"
+                    )
+                try:
+                    _, w = await asyncio.open_connection(host, port)
+                    w.close()
+                    await w.wait_closed()
+                    LOG.info("%s tunnel listening on %s:%d", label, host, port)
+                    break
+                except OSError:
+                    await asyncio.sleep(0.3)
+            else:
+                raise TimeoutError(f"{label} tunnel not ready after {timeout}s")
 
     async def reconnect(self) -> None:
+        """Kill ssh, re-launch with a fresh compression context."""
         LOG.info("reconnecting (resets SSH compression context)")
-        for attr in ("web_listener", "redis_listener"):
-            listener = getattr(self, attr)
-            if listener is not None:
-                listener.close()
-                setattr(self, attr, None)
-        if self.conn is not None:
-            try:
-                self.conn.close()
-                await self.conn.wait_closed()
-            except Exception:  # noqa: BLE001
-                pass
-            self.conn = None
-        self.compressed_log.clear()
+        await self._kill_ssh()
         await self.connect()
+
+    async def _kill_ssh(self) -> None:
+        if self._stderr_task and not self._stderr_task.done():
+            self._stderr_task.cancel()
+            self._stderr_task = None
+        if self.ssh_proc and self.ssh_proc.returncode is None:
+            self.ssh_proc.terminate()
+            try:
+                await asyncio.wait_for(self.ssh_proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                self.ssh_proc.kill()
+                await self.ssh_proc.wait()
+        self.ssh_proc = None
+        self._negotiated = {}
 
     # -- Redis interaction ---------------------------------------------------
 
@@ -183,9 +253,9 @@ class SSHState:
     async def send_secret(self) -> int:
         """Simulate the application connecting to Redis and authenticating.
 
-        The connection is closed afterwards, just like a short-lived
-        connection-pool checkout.  A PING is sent to force the lazy
-        connection open (triggering AUTH on the wire).
+        Opens a fresh redis-py connection through the tunnel; redis-py
+        sends ``AUTH default <password>`` in RESP format.  The connection
+        is closed afterwards, just like a short-lived pool checkout.
         """
         async with self._lock:
             r = aioredis.Redis(
@@ -216,27 +286,31 @@ class SSHState:
             await r.aclose()
 
     def status(self) -> dict:
-        if self.conn is None:
+        if self.ssh_proc is None or self.ssh_proc.returncode is not None:
             return {"ssh_connected": False}
         return {
             "ssh_connected": True,
             "ssh_target": f"{SSH_TARGET_HOST}:{SSH_TARGET_PORT}",
             "ssh_real_server": SSH_REAL_SERVER,
             "ssh_username": SSH_USERNAME,
-            "ssh_send_compression": self.conn.get_extra_info("send_compression"),
-            "ssh_recv_compression": self.conn.get_extra_info("recv_compression"),
-            "ssh_send_cipher": self.conn.get_extra_info("send_cipher"),
-            "ssh_recv_cipher": self.conn.get_extra_info("recv_cipher"),
-            "ssh_send_mac": self.conn.get_extra_info("send_mac"),
-            "ssh_recv_mac": self.conn.get_extra_info("recv_mac"),
+            "ssh_send_compression": self._negotiated.get(
+                "send_compression", "unknown"),
+            "ssh_recv_compression": self._negotiated.get(
+                "recv_compression", "unknown"),
+            "ssh_send_cipher": self._negotiated.get(
+                "send_cipher", "unknown"),
+            "ssh_recv_cipher": self._negotiated.get(
+                "recv_cipher", "unknown"),
+            "ssh_send_mac": self._negotiated.get("send_MAC", "unknown"),
+            "ssh_recv_mac": self._negotiated.get("recv_MAC", "unknown"),
             "port_forwards": {
                 "web_tunnel": {
-                    "active": self.web_listener is not None,
+                    "active": True,
                     "local": f"{WEB_TUNNEL_LOCAL_HOST}:{WEB_TUNNEL_LOCAL_PORT}",
                     "remote": f"{WEB_TUNNEL_DEST_HOST}:{WEB_TUNNEL_DEST_PORT}",
                 },
                 "redis_tunnel": {
-                    "active": self.redis_listener is not None,
+                    "active": True,
                     "local": f"{REDIS_TUNNEL_LOCAL_HOST}:{REDIS_TUNNEL_LOCAL_PORT}",
                     "remote": f"{REDIS_TUNNEL_DEST_HOST}:{REDIS_TUNNEL_DEST_PORT}",
                 },
@@ -292,21 +366,6 @@ async def handle_reset(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-async def handle_compressed_log(request: web.Request) -> web.Response:
-    state: SSHState = request.app["ssh"]
-    if request.query.get("clear", "0") == "1":
-        snapshot = list(state.compressed_log)
-        state.compressed_log.clear()
-        return web.json_response({"records": snapshot, "cleared": True})
-    return web.json_response({"records": list(state.compressed_log)})
-
-
-async def handle_clear_compressed_log(request: web.Request) -> web.Response:
-    state: SSHState = request.app["ssh"]
-    state.compressed_log.clear()
-    return web.json_response({"ok": True})
-
-
 async def main() -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -319,8 +378,9 @@ async def main() -> int:
         try:
             await state.connect()
             break
-        except (OSError, asyncssh.Error) as exc:
+        except (OSError, RuntimeError, TimeoutError) as exc:
             LOG.warning("connect attempt %d failed: %s", attempt, exc)
+            await state._kill_ssh()
             await asyncio.sleep(1.0)
     else:
         LOG.error("could not establish SSH transport after retries")
@@ -334,8 +394,6 @@ async def main() -> int:
     app.router.add_post("/send_secret", handle_send_secret)
     app.router.add_post("/set_secret", handle_set_secret)
     app.router.add_post("/reset", handle_reset)
-    app.router.add_get("/compressed_log", handle_compressed_log)
-    app.router.add_post("/clear_compressed_log", handle_clear_compressed_log)
 
     runner = web.AppRunner(app)
     await runner.setup()
