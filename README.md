@@ -23,13 +23,12 @@ accessible on the network.
 4. [Quick start](#quick-start)
 5. [How the attack works](#how-the-attack-works)
 6. [Three non-obvious knobs](#three-non-obvious-knobs)
-7. [AsyncSSH RFC 4253 patch](#asyncssh-rfc-4253-patch)
-8. [Results](#results)
-9. [Repository layout](#repository-layout)
-10. [HTTP control surface](#http-control-surface)
-11. [Limitations and caveats](#limitations-and-caveats)
-12. [Mitigations](#mitigations)
-13. [References](#references)
+7. [Results](#results)
+8. [Repository layout](#repository-layout)
+9. [HTTP control surface](#http-control-surface)
+10. [Limitations and caveats](#limitations-and-caveats)
+11. [Mitigations](#mitigations)
+12. [References](#references)
 
 ## Background
 
@@ -144,7 +143,7 @@ breaks SSH crypto and never modifies SSH traffic.
 ```
                      +-----------+      +----------+
                      | poc-redis |      |poc-webhost|
-                     | Redis 7   |      | nginx    |
+                     | Redis 8   |      | nginx    |
                      | :6379     |      | :80      |
                      +-----+-----+      +----+-----+
                            ^                  ^
@@ -152,8 +151,8 @@ breaks SSH crypto and never modifies SSH traffic.
                            |                  |
 +----------+      +--------+---------+      +-+----------+
 |poc-client| ---> |   poc-attacker   | ---> | poc-server  |
-|AsyncSSH  | TCP  |  TCP forwarder   | TCP  | AsyncSSH    |
-|+redis-py | :2222|  +scapy sniffer  | :22  | fwd-allowed |
+|OpenSSH   | TCP  |  TCP forwarder   | TCP  | OpenSSH     |
+|+redis-py | :2222|  +scapy sniffer  | :22  | sshd        |
 |+aiohttp  |      |  +aiohttp :9000  |      |             |
 |:8000 ctrl|      +------------------+      +-------------+
 +----------+
@@ -165,32 +164,33 @@ breaks SSH crypto and never modifies SSH traffic.
 Six long-lived containers + a one-shot keygen container:
 
 - **`poc-keygen`** -- generates an Ed25519 host key and a client user
-  key into a shared `keys/` volume on first start.  Idempotent.
-- **`poc-redis`** -- official Redis 7 (Alpine).  Started without a
+  key into a shared `keys/` volume on first start using `ssh-keygen`.
+  Idempotent.
+- **`poc-redis`** -- official Redis 8 (Alpine).  Started without a
   password; the client sets one via `CONFIG SET requirepass` after
   the SSH tunnel is up.
 - **`poc-webhost`** -- official nginx (Alpine) serving a static cat
   picture gallery from `webhost/html/`.
-- **`poc-server`** -- AsyncSSH server on port 22.  Forces compression
-  (`compression_algs=['zlib@openssh.com', 'zlib']`, no `none`
-  fallback).  Allows `direct-tcpip` channel requests for port
-  forwarding.  Accepts public-key auth from one user.  **AsyncSSH is
-  patched at image build time** to use RFC-mandated
-  `Z_PARTIAL_FLUSH` instead of its stock `Z_SYNC_FLUSH` -- see
-  [AsyncSSH RFC 4253 patch](#asyncssh-rfc-4253-patch).
-- **`poc-client`** -- AsyncSSH client + aiohttp HTTP control plane on
-  port 8000.  Connects to `attacker:2222` (not directly to the
-  server) but pins the *real* server's host key, so an active MitM
-  is detected.  Sets up two local port forwards at startup:
+- **`poc-server`** -- OpenSSH server (`sshd`) on port 22 running on
+  Debian bookworm-slim.  Forces compression (`Compression yes` in
+  `sshd_config`).  Allows `direct-tcpip` channel requests for port
+  forwarding (`AllowTcpForwarding yes`).  Accepts public-key auth
+  only for a single user (`victim`).  OpenSSH's bundled zlib wrapper
+  already uses RFC-mandated `Z_PARTIAL_FLUSH` between SSH binary
+  packets.
+- **`poc-client`** -- Python 3.14 container that manages an OpenSSH
+  client subprocess (`ssh -N -C -v`) with two local port forwards.
+  Connects to `attacker:2222` (not directly to the server) but pins
+  the *real* server's host key, so an active MitM is detected at the
+  SSH layer.  Sets up two local port forwards at startup:
   - `127.0.0.1:6379 -> redis:6379` (Redis tunnel, localhost only)
   - `0.0.0.0:8080 -> webhost:80` (web tunnel, network-accessible)
 
   Uses **redis-py** (`redis.asyncio.Redis`) for all Redis
   interactions.  `AUTH` is sent in standard RESP wire format with
-  `username='default'`.  The HTTP control plane lets the test
-  harness trigger a Redis AUTH cycle (`/send_secret`), change the
-  password (`/set_secret`), and reconnect SSH (`/reset`).  Same
-  AsyncSSH `Z_PARTIAL_FLUSH` patch.
+  `username='default'`.  An aiohttp HTTP control API on port 8000
+  lets the test harness trigger a Redis AUTH cycle (`/send_secret`),
+  change the password (`/set_secret`), and reconnect SSH (`/reset`).
 - **`poc-attacker`** -- Three jobs in one container:
   1. A passive **TCP forwarder** between `:2222` and `server:22`.  It
      never terminates, decrypts, or modifies SSH.
@@ -242,11 +242,11 @@ Expected output of step 3:
 ```
 expected         recovered        time       status
 ---------------- ---------------- ---------- ------
-hunter2          hunter2           441.0s    PASS
-correcthorse     correcthorse      928.0s    PASS
-pa55word         pa55word          530.0s    PASS
-letmein9         letmein9          490.0s    PASS
-tr0ub4dor        tr0ub4dor         510.0s    PASS
+hunter2          hunter2           259.5s    PASS
+correcthorse     correcthorse      ...       PASS
+pa55word         pa55word          ...       PASS
+letmein9         letmein9          ...       PASS
+tr0ub4dor        tr0ub4dor         ...       PASS
 
 5/5 tests passed
 ```
@@ -286,13 +286,13 @@ docker compose logs -f attacker
 
 Each byte is reported with a
 `pos N round=R best=X sum=S 2nd=Y sum=T margin=M` line.  The attack
-repeats rounds until `margin >= 32`, ensuring every byte is confirmed
+repeats rounds until `margin >= 16`, ensuring every byte is confirmed
 by a clear signal before being committed.
 
 ## How the attack works
 
 The victim's application uses redis-py to authenticate to the real
-Redis 7 server through the SSH tunnel.  redis-py sends the standard
+Redis 8 server through the SSH tunnel.  redis-py sends the standard
 RESP wire format:
 
 ```
@@ -317,12 +317,36 @@ terminator = `\r`.  Recovers e.g. `hunter2`.
 For each byte position, the attack sweeps 8 noise lengths (0..7)
 per **round** and accumulates candidate wire-byte sums across
 rounds.  After each round the *margin* (difference between best and
-second-best sum) is checked.  If `margin >= 32` the byte is
+second-best sum) is checked.  If `margin >= 16` the byte is
 resolved; otherwise another round is run with fresh tunnel
 connections whose SSH `CHANNEL_OPEN` bit-alignment jitter is
 independent of previous rounds.  The real compression signal
 (7-8 bits per correct candidate) grows linearly with rounds while
 the jitter averages out.
+
+Four progressive optimisations reduce work:
+
+- **Candidate elimination.** After each round, candidates whose
+  cumulative sum exceeds the best candidate's sum by more than
+  `min_margin` are dropped.  Wrong candidates never compress
+  smaller than the correct one, so their deficit is permanent;
+  the minimum candidate count is clamped to 2 so the margin
+  remains meaningful.
+- **Adaptive noise sweep.** After the first full noise sweep,
+  noise lengths that showed no differential signal (identical
+  wire sizes for all candidates) are pruned.  Only productive
+  noise lengths and their ±1 neighbours are kept, reducing the
+  per-round work from 8 to typically 3-5 noise lengths.
+- **Noise hint carry-over.** The productive noise lengths from
+  the previous byte position are shifted by +1 mod 8 (the prefix
+  grew by one byte, so the padding-boundary crossing moves one
+  noise length) and used as the initial noise set for the next
+  position.  This often hits the productive region on round 1,
+  avoiding an expensive full sweep.
+- **Stall detection.** If the margin fails to grow for 2
+  consecutive rounds and no candidates were eliminated, the active
+  noise set is expanded by ±1 (mod 8) to recover crossing lengths
+  lost to channel jitter.
 
 Within each round, for each `(candidate, noise_length)`:
 
@@ -428,55 +452,33 @@ originator port varies).  A single 8-noise-length sweep may land
 entirely in one chacha20 padding bin, giving margin = 0.  Repeating
 rounds with independent jitter lets the signal accumulate while the
 noise averages out.  The attack commits a byte only when
-`margin >= 32` (configurable via `min_margin`).
-
-### 4. AsyncSSH `Z_SYNC_FLUSH` -> `Z_PARTIAL_FLUSH`
-
-Stock AsyncSSH 2.x calls `zlib.compressobj.flush(Z_SYNC_FLUSH)` at
-the end of every SSH binary packet.  RFC 4253 section 6.2 instead
-specifies a *partial flush* (`Z_PARTIAL_FLUSH`) -- the same thing
-OpenSSH's bundled zlib wrapper does.  The patch makes AsyncSSH's
-compressor match an RFC-compliant implementation.
-
-## AsyncSSH RFC 4253 patch
-
-The file [`patches/asyncssh-rfc4253-partial-flush.patch`](patches/asyncssh-rfc4253-partial-flush.patch)
-is a single-hunk unified diff against `asyncssh/compression.py`
-that rewrites `_ZLibCompress.compress()` to call
-`self._comp.flush(zlib.Z_PARTIAL_FLUSH)` instead of `Z_SYNC_FLUSH`.
-
-Both [`client/Dockerfile`](client/Dockerfile) and
-[`server/Dockerfile`](server/Dockerfile) apply the patch after
-`pip install` and verify the result with a post-apply `grep` that
-fails the build if the patched file still contains
-`flush(zlib.Z_SYNC_FLUSH)` or is missing `flush(zlib.Z_PARTIAL_FLUSH)`.
+`margin >= 16` (configurable via `min_margin`).
 
 ## Results
 
-### Five canonical regression secrets -- 5/5
+### Single-secret benchmark (hunter2)
 
 ```
-expected         recovered        time       status
----------------- ---------------- ---------- ------
-hunter2          hunter2           441.0s    PASS
-correcthorse     correcthorse      928.0s    PASS
-pa55word         pa55word          530.0s    PASS
-letmein9         letmein9          490.0s    PASS
-tr0ub4dor        tr0ub4dor         510.0s    PASS
-```
+Phase 1: recovering password length...
+  length = 7 (12.4s)
+Phase 2: recovering password...
+  password = 'hunter2' (246.0s)
 
-Each password is recovered in two phases: first the RESP password
-length (typically 1 round, ~30s), then the password itself (1-5
-rounds per byte position depending on alignment jitter).
+Expected:  hunter2
+Recovered: hunter2
+Total:     259.5s
+Status:    PASS
+```
 
 ### Throughput
 
-Roughly 30-60 seconds per recovered byte with the default settings.
+Roughly 20-40 seconds per recovered byte with the default settings.
 Per byte position the attack performs
-`8 noise lengths x (alphabet + 1) candidates x 3 SSH messages`
-per round, with 1-5 rounds per position to reach `margin >= 32`.
-The HTTP round-trip to the client control API is the dominant
-bottleneck.
+`N_noise x (alive_candidates + 1) x 3 SSH messages`
+per round, where `N_noise` starts at 8 but is typically pruned to
+3-5 after the first round, and candidates are progressively
+eliminated.  Most byte positions resolve in 1-3 rounds at
+`min_margin >= 16`.
 
 ## Repository layout
 
@@ -487,28 +489,27 @@ SSH-Compression-PoC/
 +-- keys/                      -- ed25519 keys generated by keygen
 +-- literature/                -- CRIME slides, BREACH slides, HEIST paper,
 |                                 Kelsey 2002, RFCs 4250-4254, 1950, 1951
-+-- patches/
-|   +-- asyncssh-rfc4253-partial-flush.patch
-|                              -- RFC 4253 section 6.2 compliance patch
 +-- webhost/
 |   +-- html/                  -- static cat gallery served by nginx
 |       +-- index.html
 |       +-- images/cat{1..4}.svg
 +-- scripts/
-|   +-- keygen.py              -- one-shot key generator
+|   +-- keygen.sh              -- one-shot key generator (ssh-keygen)
 |   +-- verify.py              -- environment smoke test (no attack)
 |   +-- test_attack.py         -- 5-secret regression suite (two-phase RESP)
 |   +-- test_attack_random.py  -- 50-random-secret stress test
 +-- server/
-|   +-- Dockerfile             -- applies the partial-flush patch
-|   +-- requirements.txt       -- asyncssh, cryptography
-|   +-- server.py              -- AsyncSSH server with forced compression
-|                                 and direct-tcpip forwarding enabled
+|   +-- Dockerfile             -- debian:bookworm-slim + openssh-server
+|   +-- sshd_config            -- Compression yes, PubkeyAuthentication yes,
+|   |                             AllowTcpForwarding yes
+|   +-- entrypoint.sh          -- copies host key, sets up authorized_keys,
+|                                 runs sshd -D -e
 +-- client/
-|   +-- Dockerfile             -- applies the partial-flush patch
-|   +-- requirements.txt       -- asyncssh, aiohttp, cryptography, redis
-|   +-- client.py              -- AsyncSSH client with two local port
-|                                 forwards + redis-py + HTTP control plane
+|   +-- Dockerfile             -- python:3.14-slim + openssh-client
+|   +-- requirements.txt       -- aiohttp, redis
+|   +-- client.py              -- manages OpenSSH subprocess (ssh -N -C)
+|                                 with two local port forwards + redis-py
+|                                 + HTTP control plane
 +-- attacker/
     +-- Dockerfile
     +-- requirements.txt       -- scapy, aiohttp
@@ -527,8 +528,6 @@ SSH-Compression-PoC/
 | POST   | `/send_secret`             | Opens a fresh redis-py connection through the tunnel; redis-py sends `AUTH default <password>` in RESP format |
 | POST   | `/set_secret`              | JSON `{"value": "..."}` -- reconfigures the real Redis password via `CONFIG SET`, then reconnects SSH |
 | POST   | `/reset`                   | Tear down and re-open the SSH connection |
-| GET    | `/compressed_log`          | **Debug-only.** Per-packet compressed sizes via a monkey-patched zlib compressor.  The attacker container never queries this. |
-| POST   | `/clear_compressed_log`    | Clear the debug log |
 
 ### Attacker (`http://localhost:9000`)
 
@@ -549,10 +548,10 @@ SSH-Compression-PoC/
   "alphabet":       "abcdefghijklmnopqrstuvwxyz0123456789",
   "max_length":     32,
   "noise_lengths":  [0,1,2,3,4,5,6,7],
-  "settle":         0.01,
+  "settle":         0.003,
   "flush_bytes":    33000,
-  "min_margin":     32,
-  "max_rounds":     32
+  "min_margin":     16,
+  "max_rounds":     64
 }
 ```
 
@@ -574,84 +573,20 @@ SSH-Compression-PoC/
 - **Throughput is bounded by HTTP round-trips, not SSH.** Each guess
   sends a ~33 KiB dummy flush through the web tunnel, plus HTTP
   round-trips to the client's control API.
-- **Tested against (patched) AsyncSSH.** Other SSH implementations
-  (OpenSSH, libssh, ...) may differ in `MSG_IGNORE` injection,
+- **Tested against OpenSSH.** Both client and server use the
+  standard OpenSSH implementation.  Other SSH implementations
+  (libssh, PuTTY, ...) may differ in `MSG_IGNORE` injection,
   default zlib level, write-splitting, and channel-data
   fragmentation, all of which affect the precise numbers though not
-  the underlying signal.
+  the underlying signal.  In particular, implementations that inject
+  `MSG_IGNORE` packets before every `CHANNEL_DATA` (as AsyncSSH
+  does) add measurement noise that requires a higher `min_margin`.
 - **chacha20-poly1305@openssh.com.** The wire-side analysis is
   specific to chacha20-poly1305's 8-byte padding granularity.
   AES-CTR + HMAC-ETM uses a 16-byte boundary which would require a
   wider noise sweep but does not fundamentally change the attack.
 - **Redis CONFIG SET.** The test harness changes the Redis password
   at runtime via `CONFIG SET requirepass`.
-
-## zlib 1.3 and the `min_margin` threshold
-
-zlib 1.3 (shipped with Python 3.13+) redesigned the internal hash
-function used for LZ77 match finding.  The compression oracle is
-**unaffected** -- the correct candidate still compresses to exactly
-1 fewer byte -- but the changed hash function shifts the bit alignment
-of the compressed stream in a way that amplifies per-round measurement
-noise, requiring a higher `min_margin` threshold for reliable recovery.
-
-### Background: the signal chain
-
-The attack's measurement captures a TCP segment containing **two** SSH
-binary packets: a `MSG_IGNORE` (AsyncSSH inserts one before every
-`CHANNEL_DATA`) and the guess `CHANNEL_DATA` itself.  Both pass
-through the shared c->s compressor.  With chacha20-poly1305's 8-byte
-padding, each packet's wire size is quantised to 8-byte bins.
-
-Over 8 noise lengths, the 1-byte compression delta produces a
-deterministic margin of **exactly 8 wire bytes per round**: correct
-and wrong candidates each have exactly one padding-boundary crossing,
-but at adjacent noise lengths, so the correct candidate's sum is
-always 8 bytes smaller.
-
-### What zlib 1.3 changes
-
-Each attack iteration uses a fresh 33 KiB random flush whose
-compressed output fills the LZ77 sliding window.  The bit position
-after the flush's `Z_PARTIAL_FLUSH` is the starting alignment for all
-subsequent packets in that iteration.
-
-With zlib 1.2's hash function the compressed size of random data was
-highly stable across different random inputs -- the bit position after
-the flush varied by at most a few bits.  This meant the `MSG_IGNORE`
-wire size was **the same** for all candidates within a round,
-contributing zero noise to the margin.
-
-zlib 1.3's better-distributing hash function makes the compressed
-output for random data **more variable** in total byte count.  The
-resulting bit-position drift propagates through the chain of
-`Z_PARTIAL_FLUSH` boundaries (each adding 17 overhead bits that round
-differently depending on the starting position), so by the time the
-`MSG_IGNORE` before the guess is compressed, the bit alignment can
-differ enough between candidates to push the `MSG_IGNORE` wire size
-across an 8-byte padding boundary for some candidates but not others.
-
-This turns the `MSG_IGNORE` wire size into a **random +/-8 byte**
-offset per candidate.  The per-round margin becomes
-`8 (signal) + noise`, where `noise in {-8, 0, +8}`.  A wrong
-candidate can hit margin = 16 in a single round by chance (its
-`MSG_IGNORE` lands in a smaller bin), while the correct candidate's
-`MSG_IGNORE` lands in a larger bin and cancels out its signal.
-
-### Why increasing `min_margin` fixes it
-
-The guess signal accumulates linearly (8 bytes/round) while the
-`MSG_IGNORE` jitter grows as sqrt(rounds).  After *N* rounds the
-expected margin is `8N` with standard deviation ~`4*sqrt(N)`.  Setting
-`min_margin = 32` (the current default) forces at least ~4 rounds
-before committing.  At that point a false positive requires
-~4 standard deviations of accumulated noise -- probability < 0.03%
-across all candidates -- making the attack reliable on both
-zlib 1.2 and 1.3.
-
-The trade-off is throughput: each byte position now takes 2-4x more
-rounds on average (~60-120 s/byte vs. ~30-60 s/byte with the old
-threshold of 16).
 
 ## Mitigations
 
