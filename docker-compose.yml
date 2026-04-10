@@ -23,7 +23,7 @@ services:
   # password -- the client sets one via CONFIG SET after the tunnel is up.
   # ----------------------------------------------------------------------
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     container_name: poc-redis
     hostname: redis
     networks:

@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 # tcpdump is handy for ad-hoc inspection.  libpcap is optional for
 # scapy on Linux (it can use AF_PACKET sockets directly with NET_RAW),
