@@ -6,8 +6,8 @@ packet protocol.  A passive on-path observer recovers the Redis
 password that the victim's application sends through an SSH tunnel, by
 abusing the fact that all SSH port-forwarded channels in one direction
 share a single zlib compression context, and by injecting chosen
-payloads through a *second* port forward whose local endpoint is
-accessible on the network.
+payloads through the same tunnel whose local endpoint is accessible on
+the network.
 
 > **Status: research / educational PoC.** This attack assumes a
 > *strong* adversary (see [Threat model](#threat-model)) and is not
@@ -59,30 +59,27 @@ The relevant SSH protocol facts (RFC 4253 section 6.2 and RFC 4254 section 5):
 
 ### The scenario
 
-A developer tunnels two internal services through one compressed SSH
-connection to a bastion host -- the equivalent of:
+A developer tunnels Redis through a compressed SSH connection to a
+bastion host -- the equivalent of:
 
 ```
-ssh -C -L 127.0.0.1:6379:redis:6379 \
-       -L 0.0.0.0:8080:webhost:80 bastion
+ssh -C -L 0.0.0.0:6379:redis:6379 bastion
 ```
 
-- A **Redis** server that the developer's application authenticates
-  to with `AUTH default <password>`.  The tunnel is bound to
-  `127.0.0.1` because only the local app needs it.
-- An **internal web application** (nginx serving a cat picture
-  gallery).  The tunnel is bound to `0.0.0.0` because the developer
-  wants other devices on the LAN -- containers, VMs, colleagues --
-  to reach it.
+The tunnel is bound to `0.0.0.0` because the developer wants other
+devices on the LAN -- containers, VMs, colleagues -- to reach the
+Redis instance through the tunnel.  The developer's application
+authenticates to Redis with `AUTH default <password>` through the
+same tunnel.
 
-An attacker on the same network segment connects to the
-publicly-bound web tunnel on port 8080 and sends chosen bytes.
-Those bytes enter the SSH tunnel as `direct-tcpip` channel data,
-sharing the c->s zlib compression context with the Redis tunnel.
-By observing encrypted packet sizes on the wire, the attacker
-recovers the Redis password byte by byte -- without ever breaking
-SSH crypto, without shell access to the victim's machine, and
-without touching the `127.0.0.1`-bound Redis tunnel directly.
+An attacker on the same network segment connects to the tunnel on
+port 6379 and sends chosen bytes.  Those bytes enter the SSH tunnel
+as `direct-tcpip` channel data, sharing the c->s zlib compression
+context with the victim's Redis AUTH traffic.  By observing
+encrypted packet sizes on the wire, the attacker recovers the Redis
+password byte by byte -- without ever breaking SSH crypto, without
+shell access to the victim's machine, and without the victim's
+credentials.
 
 The client uses **redis-py** (`redis.asyncio`) for all Redis
 interactions, so the `AUTH` command is sent in standard RESP wire
@@ -105,16 +102,17 @@ hold:
    defaults to `none` for incoming connections and only enables
    `zlib@openssh.com` if the user passes `-C` or sets `Compression
    yes`, so this PoC is *not* a generic OpenSSH break.
-2. **Two port forwards on one SSH connection.** The victim tunnels
-   at least two services through the same SSH connection. One of
-   them carries the secret (here: Redis `AUTH`).
-3. **One port forward is network-accessible.** The victim has bound
-   at least one tunnel to `0.0.0.0` (or a routable address) so other
-   hosts on the LAN can reach it. This is common when the developer
-   wants containers, VMs, or colleagues to access the tunneled
-   service. The attacker, on the same network segment, connects to
-   this endpoint and sends chosen bytes which enter the SSH tunnel
-   as `direct-tcpip` channel data.
+2. **Network-accessible port forward.** The victim has bound a
+   tunnel to `0.0.0.0` (or a routable address) so other hosts on the
+   LAN can reach it.  This is common when the developer wants
+   containers, VMs, or colleagues to access the tunneled service.
+   The attacker, on the same network segment, connects to this
+   endpoint and sends chosen bytes which enter the SSH tunnel as
+   `direct-tcpip` channel data.
+3. **Attacker-injected and secret data share one zlib context.**
+   The attacker's connections and the victim's application traffic
+   both traverse the same SSH connection, so they share one c->s
+   zlib compression context.
 4. **Passive on-path observer.** The attacker sees ciphertext lengths
    on the wire. In the PoC the attacker is a TCP forwarder that the
    client connects to (so it sees every byte of every TCP segment
@@ -141,27 +139,25 @@ breaks SSH crypto and never modifies SSH traffic.
 ## Architecture
 
 ```
-                     +-----------+      +----------+
-                     | poc-redis |      |poc-webhost|
-                     | Redis 8   |      | nginx    |
-                     | :6379     |      | :80      |
-                     +-----+-----+      +----+-----+
-                           ^                  ^
-                           |   internal net   |
-                           |                  |
-+----------+      +--------+---------+      +-+----------+
+                                                              +-----------+
+                                                              | poc-redis |
+                                                              | Redis 8   |
+                                                              | :6379     |
+                                                              +-----+-----+
+                                                                    ^
+                                                                    | fwd
+                                                                    |
++----------+      +------------------+      +-------------+---------+
 |poc-client| ---> |   poc-attacker   | ---> | poc-server  |
 |OpenSSH   | TCP  |  TCP forwarder   | TCP  | OpenSSH     |
 |+redis-py | :2222|  +scapy sniffer  | :22  | sshd        |
 |+aiohttp  |      |  +aiohttp :9000  |      |             |
-|:8000 ctrl|      +------------------+      +-------------+
-+----------+
- tunnels:
-   127.0.0.1:6379  -> redis:6379    (secret: AUTH default <pw>)
-   0.0.0.0:8080    -> webhost:80    (attacker-accessible)
+|:8000 ctrl|      +--+---------------+      +-------------+
++----------+         |
+ :6379 <-------------+  attacker injects through exposed tunnel
 ```
 
-Six long-lived containers + a one-shot keygen container:
+Five long-lived containers + a one-shot keygen container:
 
 - **`poc-keygen`** -- generates an Ed25519 host key and a client user
   key into a shared `keys/` volume on first start using `ssh-keygen`.
@@ -169,8 +165,6 @@ Six long-lived containers + a one-shot keygen container:
 - **`poc-redis`** -- official Redis 8 (Alpine).  Started without a
   password; the client sets one via `CONFIG SET requirepass` after
   the SSH tunnel is up.
-- **`poc-webhost`** -- official nginx (Alpine) serving a static cat
-  picture gallery from `webhost/html/`.
 - **`poc-server`** -- OpenSSH server (`sshd`) on port 22 running on
   Debian bookworm-slim.  Forces compression (`Compression yes` in
   `sshd_config`).  Allows `direct-tcpip` channel requests for port
@@ -179,12 +173,11 @@ Six long-lived containers + a one-shot keygen container:
   already uses RFC-mandated `Z_PARTIAL_FLUSH` between SSH binary
   packets.
 - **`poc-client`** -- Python 3.14 container that manages an OpenSSH
-  client subprocess (`ssh -N -C -v`) with two local port forwards.
+  client subprocess (`ssh -N -C -v`) with one local port forward.
   Connects to `attacker:2222` (not directly to the server) but pins
   the *real* server's host key, so an active MitM is detected at the
-  SSH layer.  Sets up two local port forwards at startup:
-  - `127.0.0.1:6379 -> redis:6379` (Redis tunnel, localhost only)
-  - `0.0.0.0:8080 -> webhost:80` (web tunnel, network-accessible)
+  SSH layer.  Sets up the tunnel at startup:
+  - `0.0.0.0:6379 -> redis:6379` (Redis tunnel, network-accessible)
 
   Uses **redis-py** (`redis.asyncio.Redis`) for all Redis
   interactions.  `AUTH` is sent in standard RESP wire format with
@@ -204,13 +197,13 @@ Six long-lived containers + a one-shot keygen container:
      instrumentation.
 
   The attack injects payloads by opening TCP connections to
-  `client:8080` (the publicly-bound web tunnel).  This data enters
+  `client:6379` (the exposed Redis tunnel).  This data enters
   the SSH tunnel as `direct-tcpip` channel data, sharing the c->s
-  compression context with the Redis tunnel traffic.
+  compression context with the victim's Redis AUTH traffic.
 
 The Docker bridge network (`sshpoc`) is the entire network the
 attack lives on.  Container hostnames (`server`, `attacker`,
-`client`, `redis`, `webhost`) are resolved by Docker's embedded DNS.
+`client`, `redis`) are resolved by Docker's embedded DNS.
 
 ## Quick start
 
@@ -225,7 +218,7 @@ Requirements:
 cd SSH-Compression-PoC
 docker compose up -d --build
 
-# 2. Sanity-check the environment (SSH up, port forwards active,
+# 2. Sanity-check the environment (SSH up, port forward active,
 #    attacker can observe wire sizes and inject through the tunnel):
 python scripts/verify.py
 
@@ -335,7 +328,7 @@ Four progressive optimisations reduce work:
 - **Adaptive noise sweep.** After the first full noise sweep,
   noise lengths that showed no differential signal (identical
   wire sizes for all candidates) are pruned.  Only productive
-  noise lengths and their ±1 neighbours are kept, reducing the
+  noise lengths and their +/-1 neighbours are kept, reducing the
   per-round work from 8 to typically 3-5 noise lengths.
 - **Noise hint carry-over.** The productive noise lengths from
   the previous byte position are shifted by +1 mod 8 (the prefix
@@ -345,23 +338,23 @@ Four progressive optimisations reduce work:
   avoiding an expensive full sweep.
 - **Stall detection.** If the margin fails to grow for 2
   consecutive rounds and no candidates were eliminated, the active
-  noise set is expanded by ±1 (mod 8) to recover crossing lengths
+  noise set is expanded by +/-1 (mod 8) to recover crossing lengths
   lost to channel jitter.
 
 Within each round, for each `(candidate, noise_length)`:
 
 ```
-1. flush_window()         -- open a throwaway web-tunnel connection
-                             and send 33 KB of RANDOM bytes to evict
+1. flush_window()         -- open a throwaway tunnel connection and
+                             send 33 KB of RANDOM bytes to evict
                              prior guesses from the LZ77 window
-2. open_measure_tunnel()  -- open the measurement web-tunnel connection
+2. open_measure_tunnel()  -- open the measurement tunnel connection
                              BEFORE the secret so its CHANNEL_OPEN
                              lands on the far side of the secret in
                              the LZ77 window
 3. refresh_secret()       -- trigger redis-py to connect and AUTH
-                             through the Redis tunnel, placing the
-                             secret at the most-recent end of the
-                             LZ77 dictionary
+                             through the tunnel, placing the secret
+                             at the most-recent end of the LZ77
+                             dictionary
 4. measure(prefix +       -- clear the packet log, send the candidate
            candidate +       guess on the measurement tunnel, sum the
            noise)            c->s TCP payload bytes that scapy captured
@@ -375,7 +368,7 @@ is the recovered byte.
 **`flush_window`.** Two jobs in one:
 
 - **LZ77 window eviction.** Pushing >= 32 KiB of random data through
-  the web tunnel evicts prior guesses past the 32 KiB window edge.
+  the tunnel evicts prior guesses past the 32 KiB window edge.
   Without this, the new guess back-references the previous guess and
   there is no signal.
 - **zlib hash-chain stabilisation.** **Random bytes** keep every hash
@@ -424,11 +417,11 @@ boundary -- which is why the noise sweep exists.
 
 zlib's default LZ77 sliding window (`wbits=15`) is 32 768 bytes.
 The flush has to push enough random input through the compressor to
-evict the previous guess.  The data travels through the web tunnel:
-attacker -> `client:8080` -> SSH `direct-tcpip` channel -> server ->
-`webhost:80`.  nginx receives binary garbage, responds with 400, and
-closes the connection; the attacker opens a fresh one for the next
-iteration.  The data has already passed through the SSH compressor.
+evict the previous guess.  The data travels through the tunnel:
+attacker -> `client:6379` -> SSH `direct-tcpip` channel -> server ->
+`redis:6379`.  Redis receives binary garbage and closes the
+connection; the attacker opens a fresh one for the next iteration.
+The data has already passed through the SSH compressor.
 
 **Random content is critical.** An all-zeros flush saturates zlib's
 hash chain for `\x00\x00\x00`; at level 6 the match search gives up
@@ -446,7 +439,7 @@ SSH framing).
 
 ### 3. Repeat-until-confident rounds
 
-Opening a fresh web-tunnel connection per measurement introduces
+Opening a fresh tunnel connection per measurement introduces
 bit-alignment jitter from the SSH `CHANNEL_OPEN` message (its
 originator port varies).  A single 8-noise-length sweep may land
 entirely in one chacha20 padding bin, giving margin = 0.  Repeating
@@ -485,14 +478,10 @@ eliminated.  Most byte positions resolve in 1-3 rounds at
 ```
 SSH-Compression-PoC/
 +-- README.md                  -- this file
-+-- docker-compose.yml         -- six services on the sshpoc bridge
++-- docker-compose.yml         -- five services on the sshpoc bridge
 +-- keys/                      -- ed25519 keys generated by keygen
 +-- literature/                -- CRIME slides, BREACH slides, HEIST paper,
 |                                 Kelsey 2002, RFCs 4250-4254, 1950, 1951
-+-- webhost/
-|   +-- html/                  -- static cat gallery served by nginx
-|       +-- index.html
-|       +-- images/cat{1..4}.svg
 +-- scripts/
 |   +-- keygen.sh              -- one-shot key generator (ssh-keygen)
 |   +-- verify.py              -- environment smoke test (no attack)
@@ -508,14 +497,14 @@ SSH-Compression-PoC/
 |   +-- Dockerfile             -- python:3.14-slim + openssh-client
 |   +-- requirements.txt       -- aiohttp, redis
 |   +-- client.py              -- manages OpenSSH subprocess (ssh -N -C)
-|                                 with two local port forwards + redis-py
+|                                 with one local port forward + redis-py
 |                                 + HTTP control plane
 +-- attacker/
     +-- Dockerfile
     +-- requirements.txt       -- scapy, aiohttp
     +-- mitm.py                -- TCP forwarder + scapy sniffer + control API
     +-- attack.py              -- the chosen-payload attack (injects through
-                                  the web tunnel, observes Redis AUTH)
+                                  the Redis tunnel, observes Redis AUTH)
 ```
 
 ## HTTP control surface
@@ -537,7 +526,7 @@ SSH-Compression-PoC/
 | GET    | `/packet_log`       | scapy-captured TCP segments since last clear |
 | POST   | `/clear_log`        | Reset the packet log |
 | POST   | `/trigger_secret`   | Convenience: forwards to client `/send_secret` |
-| POST   | `/trigger_payload`  | Sends payload through the web tunnel (TCP to client:8080) |
+| POST   | `/trigger_payload`  | Sends payload through the Redis tunnel (TCP to client:6379) |
 | POST   | `/run_attack`       | JSON parameters; runs the attack and returns the recovered value + per-position history |
 
 `/run_attack` body fields (all optional, with shown defaults):
@@ -571,7 +560,7 @@ SSH-Compression-PoC/
   `[a-z0-9]` passwords and a known RESP prefix.  A binary secret
   with no known structure would need a much larger alphabet.
 - **Throughput is bounded by HTTP round-trips, not SSH.** Each guess
-  sends a ~33 KiB dummy flush through the web tunnel, plus HTTP
+  sends a ~33 KiB dummy flush through the tunnel, plus HTTP
   round-trips to the client's control API.
 - **Tested against OpenSSH.** Both client and server use the
   standard OpenSSH implementation.  Other SSH implementations
@@ -593,8 +582,8 @@ SSH-Compression-PoC/
 - **Disable compression.** This kills the attack outright.  SSH
   compression is opt-in in OpenSSH and the bandwidth savings on
   modern links are negligible, so this is the recommended fix.
-- **Per-channel compression contexts.** Would isolate the Redis
-  tunnel from the web tunnel, even if compression is enabled.
+- **Per-channel compression contexts.** Would isolate each
+  `direct-tcpip` channel, even if compression is enabled.
   Requires a protocol extension to RFC 4253 section 6.2.
 - **Don't bind port forwards to 0.0.0.0.** Binding to `127.0.0.1`
   (the default for OpenSSH's `-L`) prevents remote hosts from

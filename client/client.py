@@ -2,21 +2,16 @@
 
 Scenario
 --------
-The victim tunnels two internal services through **one** compressed SSH
-connection (``ssh -C``):
+The victim tunnels a Redis server through a compressed SSH connection
+(``ssh -C -L 0.0.0.0:6379:redis:6379 bastion``).  The tunnel is bound
+to ``0.0.0.0`` so other devices on the LAN (containers, VMs, colleagues)
+can reach the Redis instance.  The victim's application authenticates to
+Redis with ``AUTH default <password>`` through the same tunnel.
 
-* **Redis** (127.0.0.1:6379 -> redis:6379) -- the victim's application
-  authenticates with ``AUTH <password>`` on every new connection.  The
-  tunnel is bound to localhost because only the local app needs it.
-* **Internal web tool** (0.0.0.0:8080 -> webhost:80) -- an nginx server
-  serving cat pictures.  Bound to 0.0.0.0 because the developer wants
-  other devices on the LAN (or a local VM/container) to reach it.
-
-Both tunnels produce ``direct-tcpip`` SSH channels that share a single
-c->s zlib compression context (RFC 4253 section 6.2).  An attacker on the
-same network can connect to the publicly-bound web tunnel on port 8080
-and inject chosen bytes into that shared context, while a passive
-on-path observer watches encrypted packet sizes.
+An attacker on the same network connects to the exposed tunnel endpoint
+on port 6379 and injects chosen bytes that enter the SSH tunnel as
+``direct-tcpip`` channel data, sharing the c->s zlib compression context
+(RFC 4253 section 6.2) with the victim's AUTH traffic.
 
 HTTP control API (for the test harness only -- the attacker never uses
 endpoints that reveal the secret):
@@ -54,12 +49,7 @@ SSH_USERNAME = os.environ.get("SSH_USERNAME", "victim")
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8000"))
 
 # Port-forward configuration --------------------------------------------------
-WEB_TUNNEL_LOCAL_HOST = "0.0.0.0"
-WEB_TUNNEL_LOCAL_PORT = int(os.environ.get("WEB_TUNNEL_LOCAL_PORT", "8080"))
-WEB_TUNNEL_DEST_HOST = os.environ.get("WEB_TUNNEL_DEST_HOST", "webhost")
-WEB_TUNNEL_DEST_PORT = int(os.environ.get("WEB_TUNNEL_DEST_PORT", "80"))
-
-REDIS_TUNNEL_LOCAL_HOST = "127.0.0.1"
+REDIS_TUNNEL_LOCAL_HOST = "0.0.0.0"
 REDIS_TUNNEL_LOCAL_PORT = int(os.environ.get("REDIS_TUNNEL_LOCAL_PORT", "6379"))
 REDIS_TUNNEL_DEST_HOST = os.environ.get("REDIS_TUNNEL_DEST_HOST", "redis")
 REDIS_TUNNEL_DEST_PORT = int(os.environ.get("REDIS_TUNNEL_DEST_PORT", "6379"))
@@ -78,7 +68,7 @@ REDIS_USERNAME = "default"
 # ---------------------------------------------------------------------------
 
 class SSHState:
-    """Manages the OpenSSH client subprocess and its two local port forwards."""
+    """Manages the OpenSSH client subprocess and its local port forward."""
 
     def __init__(self, secret_value: str) -> None:
         self.ssh_proc: Optional[asyncio.subprocess.Process] = None
@@ -104,10 +94,6 @@ class SSHState:
             f"{REDIS_TUNNEL_LOCAL_HOST}:{REDIS_TUNNEL_LOCAL_PORT}:"
             f"{REDIS_TUNNEL_DEST_HOST}:{REDIS_TUNNEL_DEST_PORT}"
         )
-        web_fwd = (
-            f"{WEB_TUNNEL_LOCAL_HOST}:{WEB_TUNNEL_LOCAL_PORT}:"
-            f"{WEB_TUNNEL_DEST_HOST}:{WEB_TUNNEL_DEST_PORT}"
-        )
         return [
             "ssh",
             "-N",                                           # no remote command
@@ -120,7 +106,6 @@ class SSHState:
             "-o", "ServerAliveCountMax=3",
             "-i", CLIENT_KEY,
             "-L", redis_fwd,
-            "-L", web_fwd,
             "-p", str(SSH_TARGET_PORT),
             f"{SSH_USERNAME}@{SSH_TARGET_HOST}",
         ]
@@ -188,28 +173,25 @@ class SSHState:
         return info
 
     async def _wait_for_tunnels(self, timeout: float = 30) -> None:
-        """Poll local ports until both tunnels accept connections."""
-        tunnels = [
-            (REDIS_TUNNEL_LOCAL_HOST, REDIS_TUNNEL_LOCAL_PORT, "redis"),
-            (WEB_TUNNEL_LOCAL_HOST, WEB_TUNNEL_LOCAL_PORT, "web"),
-        ]
+        """Poll local port until the Redis tunnel accepts connections."""
         deadline = asyncio.get_event_loop().time() + timeout
-        for host, port, label in tunnels:
-            while asyncio.get_event_loop().time() < deadline:
-                if self.ssh_proc and self.ssh_proc.returncode is not None:
-                    raise RuntimeError(
-                        f"ssh exited with code {self.ssh_proc.returncode}"
-                    )
-                try:
-                    _, w = await asyncio.open_connection(host, port)
-                    w.close()
-                    await w.wait_closed()
-                    LOG.info("%s tunnel listening on %s:%d", label, host, port)
-                    break
-                except OSError:
-                    await asyncio.sleep(0.3)
-            else:
-                raise TimeoutError(f"{label} tunnel not ready after {timeout}s")
+        while asyncio.get_event_loop().time() < deadline:
+            if self.ssh_proc and self.ssh_proc.returncode is not None:
+                raise RuntimeError(
+                    f"ssh exited with code {self.ssh_proc.returncode}"
+                )
+            try:
+                _, w = await asyncio.open_connection(
+                    "127.0.0.1", REDIS_TUNNEL_LOCAL_PORT,
+                )
+                w.close()
+                await w.wait_closed()
+                LOG.info("Redis tunnel listening on %s:%d",
+                         REDIS_TUNNEL_LOCAL_HOST, REDIS_TUNNEL_LOCAL_PORT)
+                return
+            except OSError:
+                await asyncio.sleep(0.3)
+        raise TimeoutError(f"Redis tunnel not ready after {timeout}s")
 
     async def reconnect(self) -> None:
         """Kill ssh, re-launch with a fresh compression context."""
@@ -304,11 +286,6 @@ class SSHState:
             "ssh_send_mac": self._negotiated.get("send_MAC", "unknown"),
             "ssh_recv_mac": self._negotiated.get("recv_MAC", "unknown"),
             "port_forwards": {
-                "web_tunnel": {
-                    "active": True,
-                    "local": f"{WEB_TUNNEL_LOCAL_HOST}:{WEB_TUNNEL_LOCAL_PORT}",
-                    "remote": f"{WEB_TUNNEL_DEST_HOST}:{WEB_TUNNEL_DEST_PORT}",
-                },
                 "redis_tunnel": {
                     "active": True,
                     "local": f"{REDIS_TUNNEL_LOCAL_HOST}:{REDIS_TUNNEL_LOCAL_PORT}",

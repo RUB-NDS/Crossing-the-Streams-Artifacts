@@ -9,10 +9,10 @@ Checks:
   2. client HTTP control API responds AND reports
         - SSH connection established
         - zlib (or zlib@openssh.com) compression negotiated
-        - both port forwards (Redis + web tunnel) active
+        - Redis tunnel port forward active
   3. attacker can trigger client to send a Redis AUTH -> we observe
      non-zero TCP segments on the wire
-  4. attacker can inject a payload through the web tunnel -> same
+  4. attacker can inject a payload through the Redis tunnel -> same
      observation
 """
 
@@ -84,14 +84,10 @@ def main() -> int:
     print(f"  [ok] compression negotiated: send={send_alg} recv={recv_alg}")
 
     pf = cs.get("port_forwards", {})
-    web_ok = pf.get("web_tunnel", {}).get("active")
     redis_ok = pf.get("redis_tunnel", {}).get("active")
-    if not web_ok:
-        fail("web tunnel port forward not active")
     if not redis_ok:
         fail("Redis tunnel port forward not active")
-    print(f"  [ok] port forwards active: web={pf['web_tunnel']}  "
-          f"redis={pf['redis_tunnel']}")
+    print(f"  [ok] port forward active: redis={pf['redis_tunnel']}")
 
     step("3. Inspect attacker state")
     asn = http("GET", f"{ATTACKER_BASE}/status")
@@ -113,10 +109,10 @@ def main() -> int:
         fail("no TCP segments observed during Redis AUTH")
     print("  [ok] attacker observed packets while Redis AUTH was sent")
 
-    step("5. Inject payload through web tunnel and capture packet log")
+    step("5. Inject payload through Redis tunnel and capture packet log")
     http("POST", f"{ATTACKER_BASE}/clear_log")
     print("  [..] cleared packet log")
-    payload = b"GET / HTTP/1.0\r\nHost: webhost\r\n\r\n"
+    payload = b"*1\r\n$4\r\nPING\r\n"
     payload_trigger = http("POST", f"{ATTACKER_BASE}/trigger_payload",
                            body=payload)
     print(f"  [..] trigger_payload response: {payload_trigger}")
@@ -128,16 +124,16 @@ def main() -> int:
         print(f"      {r['src']}:{r['sport']} -> {r['dst']}:{r['dport']}  "
               f"len={r['tcp_payload_len']:5d}  flags={r['flags']}")
     if not payload_records:
-        fail("no TCP segments observed during web tunnel injection")
-    print("  [ok] attacker observed packets while injecting through web tunnel")
+        fail("no TCP segments observed during Redis tunnel injection")
+    print("  [ok] attacker observed packets while injecting through Redis tunnel")
 
     step("VERIFICATION PASSED")
     print("All preconditions are met:")
     print("  (1) SSH connection up with zlib compression")
-    print("  (2) Two port forwards active (Redis tunnel + web tunnel)")
+    print("  (2) Redis tunnel port forward active (0.0.0.0:6379)")
     print("  (3) Attacker observes encrypted SSH packet sizes on the wire")
     print("  (4) Attacker can trigger Redis AUTH (secret flows c->s)")
-    print("  (5) Attacker can inject data through the web tunnel (c->s)")
+    print("  (5) Attacker can inject data through the Redis tunnel (c->s)")
     print("  Both data flows share a single zlib compression context.")
     return 0
 

