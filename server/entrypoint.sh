@@ -12,5 +12,14 @@ chmod 700 /home/victim/.ssh
 chmod 600 /home/victim/.ssh/authorized_keys
 chown -R victim:victim /home/victim/.ssh
 
-echo "[server] starting sshd (Compression yes, AllowTcpForwarding yes)"
+# Set up authorized_keys for root -- the PoC client uses a root SSH login
+# to rotate the victim's sudo password between attack runs (see
+# /set_sudo_secret in client.py).  Same key as the victim, different
+# authorized_keys file.
+mkdir -p /root/.ssh
+cp /keys/client_user_key.pub /root/.ssh/authorized_keys
+chmod 700 /root/.ssh
+chmod 600 /root/.ssh/authorized_keys
+
+echo "[server] starting sshd (Compression yes, AllowTcpForwarding yes, root via pubkey)"
 exec /usr/sbin/sshd -D -e

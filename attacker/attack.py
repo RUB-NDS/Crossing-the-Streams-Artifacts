@@ -356,7 +356,7 @@ async def run_attack(
             hint: list[int] | None = None
             if prev_noise is not None:
                 nl_set = set(noise_lengths)
-                hint = sorted({(nl + 1) % (noise_lengths[-1] + 1)
+                hint = sorted({(nl - 1) % (noise_lengths[-1] + 1)
                                for nl in prev_noise} & nl_set)
 
             # Trim from the front so len(prefix + candidate) is

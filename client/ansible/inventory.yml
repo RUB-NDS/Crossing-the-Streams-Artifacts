@@ -1,0 +1,8 @@
+---
+# Single-host inventory.  The connection details (HostName, Port, User,
+# IdentityFile, LocalForward, Compression) live in /root/.ssh/config --
+# which the client generates at startup from environment variables --
+# so Ansible just needs to know the host alias.
+all:
+  hosts:
+    ansible-target:

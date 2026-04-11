@@ -1,0 +1,12 @@
+# Keep shell scripts and YAML/config files that must run inside Linux
+# containers with LF line endings even when the repo is cloned on
+# Windows (where Git's default core.autocrlf=true otherwise converts
+# them to CRLF, which breaks /bin/sh scripts at runtime).
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.cfg text eol=lf
+Dockerfile text eol=lf
+sshd_config text eol=lf
+entrypoint.sh text eol=lf
+keygen.sh text eol=lf

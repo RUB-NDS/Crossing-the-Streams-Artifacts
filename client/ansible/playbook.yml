@@ -1,0 +1,41 @@
+---
+# Minimal Ansible playbook used by the CRIME-on-SSH Ansible variant.
+#
+# The point of the playbook is not to do anything useful on the server:
+# it exists to reproduce the exact wire behaviour of `become: yes` with
+# sudo -- namely, writing the sudo password to ssh's stdin, which ends
+# up in a single SSH_MSG_CHANNEL_DATA packet on the session channel.
+#
+# The task uses the `raw` module on purpose: `raw` talks to the server
+# via a single ssh exec request, with no Python interpreter discovery,
+# no module upload over sftp/scp, and no AnsiballZ wrapper -- so the
+# client->server zlib stream contains exactly one CHANNEL_REQUEST
+# ("sudo -S -p ... /bin/sh -c 'echo BECOME-SUCCESS ; sleep 120'") and
+# exactly one CHANNEL_DATA containing the sudo password.  This matches
+# the wire model that attack_ansible.py expects (and keeps the server
+# image minimal -- no python needed).
+#
+# The `sleep 120` keeps the SSH connection (and therefore the local
+# port-forward configured in /root/.ssh/config) alive long enough for
+# the attacker to open one direct-tcpip channel through the same zlib
+# compression context and inject one CRIME-style guess.  The client's
+# /send_secret_ansible handler kills the playbook as soon as the next
+# guess is triggered, so the 120-second upper bound only matters if
+# the attacker stops sending guesses.
+- name: CRIME-on-SSH Ansible variant -- one connection per guess
+  hosts: ansible-target
+  gather_facts: false
+  become: true
+  become_method: sudo
+  tasks:
+    - name: keep the SSH tunnel alive for one attacker injection
+      # With ControlMaster disabled, the SSH subprocess that
+      # ansible-playbook spawns is the *only* thing keeping the
+      # LocalForward port alive.  We need it to stay up long enough
+      # for the attacker to open its measure tunnel, write the guess,
+      # and read the wire length after the become password has been
+      # sent -- a few hundred milliseconds suffice.  `sleep 2` gives
+      # plenty of margin; the client's /send_secret_ansible handler
+      # kills the playbook as soon as the next iteration starts, so
+      # the upper bound only matters if the attacker stops iterating.
+      ansible.builtin.raw: sleep 2

@@ -70,7 +70,12 @@ services:
       - HTTP_PORT=9000
       - CLIENT_CONTROL_URL=http://client:8000
       - CLIENT_HOST=client
+      # Local forward ports on the client that the attacker dials into.
+      # TUNNEL_PORT is the Redis tunnel used by the direct/BEAST variants;
+      # ANSIBLE_TUNNEL_PORT is the LocalForward declared in the client's
+      # /root/.ssh/config and used by the Ansible variant.
       - TUNNEL_PORT=6379
+      - ANSIBLE_TUNNEL_PORT=15432
     ports:
       - "9000:9000"
     networks:
@@ -106,6 +111,15 @@ services:
       - REDIS_TUNNEL_DEST_HOST=redis
       - REDIS_TUNNEL_DEST_PORT=6379
       - SECRET_VALUE=hunter2
+      # Ansible variant: the LocalForward that the user has "already
+      # configured" in /root/.ssh/config and that ansible-playbook
+      # inherits when it runs a become-task.  The attacker connects to
+      # client:ANSIBLE_TUNNEL_LOCAL_PORT to inject into the same zlib
+      # compression context as the Ansible sudo password.
+      - ANSIBLE_TUNNEL_LOCAL_PORT=15432
+      - ANSIBLE_TUNNEL_DEST_HOST=redis
+      - ANSIBLE_TUNNEL_DEST_PORT=6379
+      - SUDO_SECRET_VALUE=hunter2
     ports:
       - "8000:8000"
     networks:

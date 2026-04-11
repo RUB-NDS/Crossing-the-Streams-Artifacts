@@ -18,6 +18,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Download Chromium (system deps already installed above).
 RUN playwright install chromium
 
+# Ansible config + playbook + inventory used by the Ansible attack
+# variant.  ANSIBLE_CONFIG points Ansible at our config.
+ENV ANSIBLE_CONFIG=/app/ansible/ansible.cfg
+COPY client/ansible /app/ansible
+
 COPY client/client.py .
 
 CMD ["python", "/app/client.py"]

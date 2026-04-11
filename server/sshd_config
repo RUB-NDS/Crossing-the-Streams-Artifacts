@@ -14,8 +14,11 @@ PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 AuthenticationMethods publickey
-PermitRootLogin no
-AllowUsers victim
+# prohibit-password = allow root via pubkey only, never via password.
+# Used by the PoC's /set_sudo_secret helper so the client can remotely
+# change the victim's sudo password between attack runs.
+PermitRootLogin prohibit-password
+AllowUsers victim root
 
 # Port forwarding -- allow direct-tcpip (local forwarding from client)
 AllowTcpForwarding yes
