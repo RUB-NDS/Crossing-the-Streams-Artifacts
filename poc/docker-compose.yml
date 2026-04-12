@@ -1,0 +1,63 @@
+name: ansible-ssh-compression-vuln-poc
+
+services:
+  # TCP drain -- destination of the victim's LocalForward.
+  target:
+    build: ./target
+    container_name: ansible-poc-target
+    hostname: target
+    networks:
+      - sshpoc
+
+  # sshd + sudo target host.
+  server:
+    build: ./server
+    container_name: ansible-poc-server
+    hostname: server
+    depends_on:
+      target:
+        condition: service_started
+    volumes:
+      - ./keys:/keys:ro
+    networks:
+      - sshpoc
+
+  # Passive TCP relay + sniffer + attack logic.
+  attacker:
+    build: ./attacker
+    container_name: ansible-poc-attacker
+    hostname: attacker
+    depends_on:
+      - server
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "9000:9000"
+    networks:
+      - sshpoc
+
+  # Victim: ansible-playbook with become on request.
+  client:
+    build: ./client
+    container_name: ansible-poc-client
+    hostname: client
+    depends_on:
+      attacker:
+        condition: service_started
+      target:
+        condition: service_started
+    volumes:
+      - ./keys:/keys:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "8000:8000"
+    networks:
+      - sshpoc
+
+networks:
+  sshpoc:
+    driver: bridge

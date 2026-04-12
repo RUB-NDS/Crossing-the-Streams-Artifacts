@@ -1,0 +1,2 @@
+aiohttp==3.13.5
+ansible-core==2.20.4

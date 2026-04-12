@@ -1,0 +1,8 @@
+HostKey /etc/ssh/server_host_key
+
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+
+# Root login for out-of-band sudo password rotation (chpasswd).
+PermitRootLogin prohibit-password
+AllowUsers victim root
