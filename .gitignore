@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+benchmark_results.json
+benchmark_summary.csv
