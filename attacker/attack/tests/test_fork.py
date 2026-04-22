@@ -137,6 +137,111 @@ def test_classify_fork_outcome_zero_clean():
     assert indices == []
 
 
+import asyncio
+import attacker.attack.engine as engine_mod
+from attacker.attack.engine import resolve_stalled_position
+
+
+class _FakeCrack:
+    """Scripted fake for crack_byte_position. Records call log."""
+
+    def __init__(self, responses: list[tuple[bytes, dict]]):
+        self._responses = list(responses)
+        self.calls: list[dict] = []
+
+    async def __call__(self, adapter, config, prefix, initial_alignment, log_prefix):
+        self.calls.append({
+            "prefix": prefix,
+            "initial_alignment": list(initial_alignment),
+            "log_prefix": log_prefix,
+        })
+        if not self._responses:
+            raise AssertionError(f"FakeCrack exhausted — unexpected call: {log_prefix}")
+        return self._responses.pop(0)
+
+
+def _install_fake(fake: _FakeCrack):
+    engine_mod.crack_byte_position = fake
+
+
+def _restore_crack(original):
+    engine_mod.crack_byte_position = original
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def test_resolve_unique_winner_commits_two_positions():
+    original = engine_mod.crack_byte_position
+    fake = _FakeCrack([
+        # Branch 'e' at pos 5: cleanly commits 'r'
+        _branch_result(clean=True,  best="r"),
+        # Branch 'c' at pos 5: stalls on some junk byte
+        _branch_result(clean=False, best="x"),
+        # Branch 'k' at pos 5: stalls on some junk byte
+        _branch_result(clean=False, best="y"),
+    ])
+    _install_fake(fake)
+    try:
+        cfg = _cfg(
+            candidate_fork_on_stall=True, fork_top_k=3, max_fork_depth=2,
+            max_length=32, min_margin=16,
+        )
+        stalled = _stalled_info(
+            sums={"e": 100, "c": 112, "k": 120, "s": 200, "r": 210},
+        )
+        result = _run(resolve_stalled_position(
+            adapter=None, config=cfg,
+            committed_prefix=b"hunt", position=4,
+            stalled_pos_info=stalled, alignment_hint=3, depth=0,
+        ))
+    finally:
+        _restore_crack(original)
+
+    # Should return 2 dicts: origin (pos 4) + winner's N+1 (pos 5)
+    assert len(result) == 2
+
+    origin = result[0]
+    assert origin["position"] == 4
+    assert origin["best"] == "e"
+    assert origin["clean_commit"] is False
+    assert origin["via_fork"] is False
+    assert origin["fork_origin"] is None
+    assert origin["fork_info"]["triggered"] is True
+    assert origin["fork_info"]["depth_used"] == 1
+    assert origin["fork_info"]["branches_run"] == 3
+    assert origin["fork_info"]["outcome"] == "unique_clean"
+    assert origin["fork_info"]["committed_via_fork"] == [5]
+    # Origin guesses = original stall work + losers' branch work
+    # Stall work = 4000 (from _stalled_info), two losing branches = 2 * 100 = 200
+    assert origin["guesses"] == 4000 + 200
+    assert origin["fork_info"]["losers_guesses"] == 200
+    assert origin["fork_info"]["total_fork_guesses"] == 300  # 3 branches * 100
+
+    winner = result[1]
+    assert winner["position"] == 5
+    assert winner["best"] == "r"
+    assert winner["clean_commit"] is True
+    assert winner["via_fork"] is True
+    assert winner["fork_origin"] == 4
+
+    # Verify each branch was invoked with the right hypothetical prefix
+    # Base prefix = known_prefix + "hunt" (committed) — trimmed to len(known_prefix)
+    # We use _cfg's known_prefix = b"*3\r\n$"  (5 bytes), recovered="hunt" (4 bytes)
+    # full = known + recovered + branch (6 + 1 = 6 bytes after trim to 5) — actually depends on trim
+    # We just verify the branches were invoked in order e, c, k
+    assert len(fake.calls) == 3
+    # The hypothetical prefix should end with each branch candidate
+    assert fake.calls[0]["prefix"].endswith(b"e")
+    assert fake.calls[1]["prefix"].endswith(b"c")
+    assert fake.calls[2]["prefix"].endswith(b"k")
+    # All branches inherit the same alignment hint
+    assert fake.calls[0]["initial_alignment"] == [3]
+    assert fake.calls[1]["initial_alignment"] == [3]
+    assert fake.calls[2]["initial_alignment"] == [3]
+
+
 if __name__ == "__main__":
     test_fork_applicable_all_preconditions_met()
     test_fork_applicable_config_off()
@@ -150,4 +255,5 @@ if __name__ == "__main__":
     test_classify_fork_outcome_unique_clean()
     test_classify_fork_outcome_multi_clean()
     test_classify_fork_outcome_zero_clean()
+    test_resolve_unique_winner_commits_two_positions()
     print("fork tests: ok")

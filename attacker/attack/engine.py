@@ -154,6 +154,157 @@ def _classify_fork_outcome(
     return "zero", []
 
 
+async def resolve_stalled_position(
+    adapter: Adapter,
+    config: AttackConfig,
+    committed_prefix: bytes,
+    position: int,
+    stalled_pos_info: dict,
+    alignment_hint: int | None,
+    depth: int,
+) -> list[dict]:
+    """Disambiguate a stalled position by speculatively running the next one.
+
+    Returns 1..(max_fork_depth + 1) position-info dicts. The first is the
+    stalled position's final result with `fork_info` merged in; each
+    subsequent dict is a position committed via a fork winner (marked
+    `via_fork=True`).
+
+    See docs/superpowers/specs/2026-04-22-fork-on-stall-design.md.
+    """
+    branches = _select_fork_branches(
+        stalled_pos_info, config.fork_top_k, config.terminator,
+    )
+    if not branches:
+        return [_fork_skipped_info(
+            stalled_pos_info, position, reason="insufficient_branches",
+        )]
+
+    # Run each branch speculatively at position+1.
+    branch_results: list[tuple[bytes, dict]] = []
+    for branch_candidate in branches:
+        hypothetical_recovered = committed_prefix + branch_candidate
+        hypothetical_prefix = _trimmed_prefix(
+            config.known_prefix, hypothetical_recovered, config,
+        )
+        initial_alignment = (
+            [alignment_hint] if (alignment_hint is not None
+                                 and alignment_hint in config.alignment_lengths
+                                 and config.alignment_hint_carryover)
+            else list(config.alignment_lengths)
+        )
+        result = await crack_byte_position(
+            adapter=adapter, config=config,
+            prefix=hypothetical_prefix,
+            initial_alignment=initial_alignment,
+            log_prefix=f"pos {position+1:2d} fork[{branch_candidate.decode('latin-1')}]",
+        )
+        branch_results.append(result)
+
+    outcome, clean_indices = _classify_fork_outcome(branch_results)
+
+    losers_guesses = sum(
+        info["guesses"] for i, (_b, info) in enumerate(branch_results)
+        if i not in clean_indices
+    )
+    total_fork_guesses = sum(info["guesses"] for _b, info in branch_results)
+
+    if outcome == "unique":
+        winner_idx = clean_indices[0]
+        winner_candidate = branches[winner_idx]
+        winner_best_byte, winner_info = branch_results[winner_idx]
+        # If the winner is not the lone clean branch from the loss
+        # standpoint, losers = all non-winner branches
+        losers_guesses = sum(
+            info["guesses"] for i, (_b, info) in enumerate(branch_results)
+            if i != winner_idx
+        )
+        origin = _fork_origin_info(
+            stalled_pos_info,
+            position=position,
+            best_candidate=winner_candidate,
+            depth_used=depth + 1,
+            branches_run=len(branches),
+            losers_guesses=losers_guesses,
+            total_fork_guesses=total_fork_guesses,
+            outcome="unique_clean",
+            committed_via_fork=[position + 1],
+        )
+        winner_pos = {
+            **winner_info,
+            "position": position + 1,
+            "via_fork": True,
+            "fork_origin": position,
+            "fork_info": None,
+        }
+        return [origin, winner_pos]
+
+    # Multi-clean / zero-clean / depth-cap paths are added in subsequent tasks.
+    raise NotImplementedError(
+        f"fork outcome {outcome!r} not yet implemented"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fork-info constructors (pure)
+# ---------------------------------------------------------------------------
+
+def _fork_origin_info(
+    stalled_pos_info: dict,
+    *,
+    position: int,
+    best_candidate: bytes,
+    depth_used: int,
+    branches_run: int,
+    losers_guesses: int,
+    total_fork_guesses: int,
+    outcome: str,
+    committed_via_fork: list[int],
+) -> dict:
+    """Build the origin position's final info dict with fork_info merged."""
+    return {
+        **stalled_pos_info,
+        "position": position,
+        "best": best_candidate.decode("latin-1"),
+        "guesses": stalled_pos_info["guesses"] + losers_guesses,
+        "clean_commit": False,
+        "via_fork": False,
+        "fork_origin": None,
+        "fork_info": {
+            "triggered": True,
+            "depth_used": depth_used,
+            "branches_run": branches_run,
+            "losers_guesses": losers_guesses,
+            "total_fork_guesses": total_fork_guesses,
+            "reason": None,
+            "outcome": outcome,
+            "committed_via_fork": list(committed_via_fork),
+        },
+    }
+
+
+def _fork_skipped_info(
+    stalled_pos_info: dict, position: int, reason: str,
+) -> dict:
+    """Build a fork-skipped position dict (terminator-only / max_length)."""
+    return {
+        **stalled_pos_info,
+        "position": position,
+        "via_fork": False,
+        "fork_origin": None,
+        "fork_info": {
+            "triggered": False,
+            "depth_used": 0,
+            "branches_run": 0,
+            "losers_guesses": 0,
+            "total_fork_guesses": 0,
+            "reason": reason,
+            "outcome": None,
+            "committed_via_fork": [],
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Per-position recovery
 # ---------------------------------------------------------------------------
