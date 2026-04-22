@@ -239,10 +239,127 @@ async def resolve_stalled_position(
         }
         return [origin, winner_pos]
 
-    # Multi-clean / zero-clean / depth-cap paths are added in subsequent tasks.
-    raise NotImplementedError(
-        f"fork outcome {outcome!r} not yet implemented"
+    # outcome is "multi" or "zero": try depth-2 if allowed AND in bounds.
+    # max_fork_depth > 2 is silently capped at 2 (spec out-of-scope).
+    can_attempt_depth2 = (
+        config.max_fork_depth >= 2
+        and position + 2 < config.max_length
     )
+    if not can_attempt_depth2:
+        # Depth-2 disabled or position+2 out of bounds: best-margin at N.
+        return [_fork_origin_info(
+            stalled_pos_info,
+            position=position,
+            best_candidate=branches[0],   # best-margin at N
+            depth_used=1,
+            branches_run=len(branches),
+            losers_guesses=total_fork_guesses,
+            total_fork_guesses=total_fork_guesses,
+            outcome="best_margin_fallback",
+            committed_via_fork=[],
+        )]
+
+    # Pick parent branches for depth-2:
+    #   multi-clean -> only cleanly-committing branches
+    #   zero-clean  -> all branches (each extended with its best-margin N+1)
+    if outcome == "multi":
+        parent_indices = list(clean_indices)
+    else:  # zero
+        parent_indices = list(range(len(branches)))
+
+    # Run one crack_byte_position per parent at position+2, extending the
+    # hypothetical prefix with that parent's N+1 best (clean-committed or
+    # best-margin).
+    depth2_results: list[tuple[int, tuple[bytes, dict]]] = []
+    for p_idx in parent_indices:
+        parent_candidate = branches[p_idx]
+        parent_N1_byte, _parent_info = branch_results[p_idx]
+        extended_recovered = committed_prefix + parent_candidate + parent_N1_byte
+        hypothetical_prefix = _trimmed_prefix(
+            config.known_prefix, extended_recovered, config,
+        )
+        initial_alignment = (
+            [alignment_hint] if (alignment_hint is not None
+                                 and alignment_hint in config.alignment_lengths
+                                 and config.alignment_hint_carryover)
+            else list(config.alignment_lengths)
+        )
+        d2_log = (
+            f"pos {position+2:2d} fork2["
+            f"{parent_candidate.decode('latin-1')}{parent_N1_byte.decode('latin-1')}]"
+        )
+        d2_result = await crack_byte_position(
+            adapter=adapter, config=config,
+            prefix=hypothetical_prefix,
+            initial_alignment=initial_alignment,
+            log_prefix=d2_log,
+        )
+        depth2_results.append((p_idx, d2_result))
+
+    # Identify depth-2 clean winners.
+    d2_clean = [
+        (p_idx, r) for p_idx, r in depth2_results
+        if r[1].get("clean_commit", False)
+    ]
+    d2_total_guesses = sum(r[1]["guesses"] for _p, r in depth2_results)
+    d2_losers_guesses = sum(
+        r[1]["guesses"] for p_idx, r in depth2_results
+        if not r[1].get("clean_commit", False)
+    )
+    total_fork_guesses_all = total_fork_guesses + d2_total_guesses
+
+    if len(d2_clean) == 1:
+        # Winner found at depth 2.
+        winner_p_idx, (winner_N2_byte, winner_N2_info) = d2_clean[0]
+        winner_candidate_N = branches[winner_p_idx]
+        winner_N1_byte, winner_N1_info = branch_results[winner_p_idx]
+
+        # Losers: all depth-1 non-winner branches + all depth-2 non-winner results.
+        losers_d1 = sum(
+            info["guesses"] for i, (_b, info) in enumerate(branch_results)
+            if i != winner_p_idx
+        )
+        losers_total = losers_d1 + d2_losers_guesses
+
+        origin = _fork_origin_info(
+            stalled_pos_info,
+            position=position,
+            best_candidate=winner_candidate_N,
+            depth_used=2,
+            branches_run=len(branches) + len(depth2_results),
+            losers_guesses=losers_total,
+            total_fork_guesses=total_fork_guesses_all,
+            outcome="unique_clean",
+            committed_via_fork=[position + 1, position + 2],
+        )
+        winner_n1 = {
+            **winner_N1_info,
+            "position": position + 1,
+            "via_fork": True,
+            "fork_origin": position,
+            "fork_info": None,
+        }
+        winner_n2 = {
+            **winner_N2_info,
+            "position": position + 2,
+            "via_fork": True,
+            "fork_origin": position,
+            "fork_info": None,
+        }
+        return [origin, winner_n1, winner_n2]
+
+    # No unique depth-2 winner: fall back to best-margin at N.
+    return [_fork_origin_info(
+        stalled_pos_info,
+        position=position,
+        best_candidate=branches[0],
+        depth_used=2,
+        branches_run=len(branches) + len(depth2_results),
+        losers_guesses=total_fork_guesses_all,
+        total_fork_guesses=total_fork_guesses_all,
+        outcome="best_margin_fallback",
+        committed_via_fork=[],
+    )]
 
 
 # ---------------------------------------------------------------------------

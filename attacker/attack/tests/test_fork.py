@@ -242,6 +242,54 @@ def test_resolve_unique_winner_commits_two_positions():
     assert fake.calls[2]["initial_alignment"] == [3]
 
 
+def test_resolve_multi_clean_recurses_and_finds_2ply_winner():
+    original = engine_mod.crack_byte_position
+    # Depth-1: branches e, c, k. e and c both cleanly commit at pos 5.
+    # Depth-2: extend each with their N+1 byte. e→r cleanly commits at pos 6;
+    # c→q stalls; k is not recursed (wasn't clean at depth 1).
+    fake = _FakeCrack([
+        # Depth-1 calls (in branch order e, c, k)
+        _branch_result(clean=True,  best="r"),   # e's N+1
+        _branch_result(clean=True,  best="q"),   # c's N+1
+        _branch_result(clean=False, best="z"),   # k's N+1
+        # Depth-2 calls (only from cleanly-committed depth-1 branches: e, c)
+        _branch_result(clean=True,  best="t"),   # e→r→t at pos 6
+        _branch_result(clean=False, best="w"),   # c→q→w at pos 6
+    ])
+    _install_fake(fake)
+    try:
+        cfg = _cfg(
+            candidate_fork_on_stall=True, fork_top_k=3, max_fork_depth=2,
+            max_length=32, min_margin=16,
+        )
+        stalled = _stalled_info(
+            sums={"e": 100, "c": 112, "k": 120, "s": 200, "r": 210},
+        )
+        result = _run(resolve_stalled_position(
+            adapter=None, config=cfg,
+            committed_prefix=b"hunt", position=4,
+            stalled_pos_info=stalled, alignment_hint=3, depth=0,
+        ))
+    finally:
+        _restore_crack(original)
+
+    # Should return 3 dicts: origin (pos 4), N+1 (pos 5), N+2 (pos 6)
+    assert len(result) == 3
+    assert result[0]["position"] == 4
+    assert result[0]["best"] == "e"
+    assert result[0]["fork_info"]["depth_used"] == 2
+    assert result[0]["fork_info"]["outcome"] == "unique_clean"
+    assert result[0]["fork_info"]["committed_via_fork"] == [5, 6]
+    assert result[1]["position"] == 5
+    assert result[1]["best"] == "r"
+    assert result[1]["via_fork"] is True
+    assert result[1]["fork_origin"] == 4
+    assert result[2]["position"] == 6
+    assert result[2]["best"] == "t"
+    assert result[2]["via_fork"] is True
+    assert result[2]["fork_origin"] == 4
+
+
 if __name__ == "__main__":
     test_fork_applicable_all_preconditions_met()
     test_fork_applicable_config_off()
@@ -256,4 +304,5 @@ if __name__ == "__main__":
     test_classify_fork_outcome_multi_clean()
     test_classify_fork_outcome_zero_clean()
     test_resolve_unique_winner_commits_two_positions()
+    test_resolve_multi_clean_recurses_and_finds_2ply_winner()
     print("fork tests: ok")
