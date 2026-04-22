@@ -33,7 +33,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, Callable
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 COMPOSE_FILES = [
@@ -235,9 +235,9 @@ def _run_two_phase(
     phase1_alphabet: str,
     phase1_max: int,
     phase1_terminator: str | None,
-    phase2_prefix_from_phase1: callable,
+    phase2_prefix_from_phase1: Callable,
     phase2_alphabet: str,
-    phase2_max_fn: callable,
+    phase2_max_fn: Callable,
     phase2_terminator: str | None,
     strip_trailing: str,
 ) -> dict:
