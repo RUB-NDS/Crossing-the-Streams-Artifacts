@@ -220,9 +220,8 @@ async def resolve_stalled_position(
     if outcome == "unique":
         winner_idx = clean_indices[0]
         winner_candidate = branches[winner_idx]
-        winner_best_byte, winner_info = branch_results[winner_idx]
-        # If the winner is not the lone clean branch from the loss
-        # standpoint, losers = all non-winner branches
+        _, winner_info = branch_results[winner_idx]
+        # Losers = all non-winner depth-1 branches
         losers_guesses = sum(
             info["guesses"] for i, (_b, info) in enumerate(branch_results)
             if i != winner_idx
