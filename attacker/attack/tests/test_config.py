@@ -61,8 +61,29 @@ def test_overlay_handles_bytes_fields_as_str():
     assert overridden.alphabet == [b"x", b"y", b"z"]
 
 
+def test_fork_fields_default_on_and_tuned():
+    cfg = AttackConfig(**_base_kwargs())
+    assert cfg.candidate_fork_on_stall is True
+    assert cfg.fork_top_k == 5
+    assert cfg.max_fork_depth == 2
+
+
+def test_overlay_fork_fields():
+    base = AttackConfig(**_base_kwargs())
+    overridden = base.overlay({
+        "candidate_fork_on_stall": False,
+        "fork_top_k": 7,
+        "max_fork_depth": 3,
+    })
+    assert overridden.candidate_fork_on_stall is False
+    assert overridden.fork_top_k == 7
+    assert overridden.max_fork_depth == 3
+
+
 if __name__ == "__main__":
     test_construct_defaults()
     test_from_dict_partial_override()
     test_overlay_handles_bytes_fields_as_str()
+    test_fork_fields_default_on_and_tuned()
+    test_overlay_fork_fields()
     print("config tests: ok")

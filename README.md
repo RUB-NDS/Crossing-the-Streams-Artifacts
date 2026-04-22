@@ -280,6 +280,21 @@ while the noise averages out. The engine commits a byte only when
 the margin between the best and second-best candidate exceeds the
 configured `min_margin`.
 
+### Fork-on-stall (BEAST correctness fallback)
+
+When a position exhausts `max_rounds` without reaching `min_margin`, the
+engine speculatively runs the *next* position for each of the top-K
+stalled candidates. Only the correct branch yields a clean commit at the
+next position; wrong branches stall again or commit spurious bytes with
+weak margins. A unique clean commit disambiguates the stalled position
+and commits the next one at the same time. If two branches both commit
+cleanly or none does, the engine recurses to 2-ply. On exhaustion, it
+falls back to the best-margin candidate.
+
+Direct and ansible variants rarely trigger this path because their
+signals are clean; BEAST exhibits a persistent-bias edge case at
+`hunter2` pos 4 that this fallback is specifically designed for.
+
 ### Constant-prefix trimming
 
 As each byte is recovered, it is appended to the known prefix and
@@ -492,20 +507,27 @@ Total:     ≈ 240 s
 Status:    PASS
 ```
 
-### BEAST variant — known limitation
+### BEAST variant — `hunter2`
 
-The BEAST variant currently recovers `hunt…` correctly and then
-commits a wrong fifth byte (`huntc` instead of `hunte`) even at
-conservative margins. Diagnostics show a persistent, non-random bias
-in the per-round signal that averaging across rounds does not clear;
-the flush-regeneration fix that solved the cached-state bias was
-necessary but not sufficient.
+```
+Phase 1: recovering password length...
+  length = 7          ( ≈ 15 s)
+Phase 2: recovering password...
+  password = 'hunter2' ( ≈ 20 min, 1 fork at pos 4)
 
-The spec (`docs/superpowers/specs/2026-04-22-unified-attack-design.md`)
-captures a planned mitigation: a **candidate fork on stall** that
-speculatively runs the *next* byte position under both top
-candidates when `margin` fails to converge, and lets the
-next-position oracle disambiguate. This is tracked as future work.
+Total:     ≈ 20 min
+Status:    PASS (with fork-on-stall enabled — see below)
+```
+
+The BEAST per-round signal at pos 4 of `hunter2` exhibits a persistent,
+non-random bias (`huntc` vs `hunte` within a few wire bytes) that
+averaging across rounds cannot clear. The engine's **fork-on-stall**
+correctness fallback disambiguates by speculatively running position 5
+for the top-K stalled candidates and committing the branch that cleanly
+resolves. Position 5 is committed from the winning branch's speculative
+run, so the attack advances two positions at once. See
+`docs/superpowers/specs/2026-04-22-fork-on-stall-design.md` for the
+algorithm.
 
 ### Throughput comparison (indicative)
 

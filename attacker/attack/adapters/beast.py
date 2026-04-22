@@ -89,6 +89,9 @@ class BeastAdapter:
             flush_bytes=33000,
             flush_pool="high_ascii",
             measurement_min_segment_size=100,
+            candidate_fork_on_stall=True,
+            fork_top_k=5,
+            max_fork_depth=2,
             label="beast-default",
         )
 
