@@ -2,224 +2,173 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## What this is
+`README.md` is the canonical reference for the threat model, attack
+algorithm, load-bearing constants, and HTTP control surface. Read it
+first. This file covers only what's not there: repo workflow,
+cross-file architecture, and the pitfalls that bite during edits.
 
-A self-contained Docker environment that demonstrates a CRIME-style
-chosen-payload compression side-channel attack against the SSH binary packet
-protocol. A passive on-path observer recovers a Redis password that the
-victim's application sends through an SSH tunnel, exploiting the fact that
-all SSH `direct-tcpip` channels in one direction share a **single zlib
-compression context** (RFC 4253 §6.2). Research / educational PoC.
-
-Two attack variants are implemented: **direct** (attacker opens TCP
-connections to the victim's exposed tunnel) and **BEAST** (victim's browser
-executes `navigator.sendBeacon()` via a headless Chromium driven by
-Playwright). Both funnel injected bytes into the shared zlib context and
-observe resulting wire lengths. See `README.md` for the full threat model
-and algorithm background — it's the canonical reference for how and why the
-attack works.
-
-## Running the PoC
+## Common commands
 
 ```bash
-# Build + start all containers (keygen → redis → server → attacker → client)
+# Bring up the five-service stack (keygen → redis → server → attacker → client)
 docker compose up -d --build
 
-# Smoke-test the environment and the direct attack surface
-python scripts/verify.py
+# After editing Python in attacker/ or client/, rebuild — sources are COPY'd, not bind-mounted
+docker compose build attacker && docker compose up -d attacker
+docker compose build client   && docker compose up -d client
 
-# Run the BEAST smoke test + hunter2 recovery
-python scripts/verify_beast.py
+# End-to-end verification (each ≈ 2–4 min)
+python scripts/verify_direct.py
+python scripts/verify_beast.py      # known limitation: commits 'huntc' at pos 4 — see README "Results"
+python scripts/verify_ansible.py
 
-# Regression suite: 5 fixed passwords, direct variant (~20 min)
-python scripts/test_attack.py
+# Scenario benchmark (multi-stack, isolated compose projects)
+python scripts/benchmark.py --stacks 4 --trials 100 --scenario all-opts
+python scripts/benchmark.py --stacks 2 --trials 50 --variants direct --scenario fixed-nl --fixed-nl 1
 
-# Stress suite: 50 seeded-random passwords, direct variant
-python scripts/test_attack_random.py
-
-# Watch the per-byte round log while an attack runs
+# Watch per-byte progress while an attack runs
 docker compose logs -f attacker
+
+# Engine-helper sanity tests (pure-logic, run on the host, no container needed)
+python -m attacker.attack.tests.test_engine_helpers
+python -m attacker.attack.tests.test_alignment
+python -m attacker.attack.tests.test_config
 ```
 
-Host-side scripts use only the Python standard library (`urllib`, `json`).
-They target `http://127.0.0.1:9000` (attacker control) and
-`http://127.0.0.1:8000` (client control), which Docker exposes on the host.
-Everything else runs inside containers. There is **no lint step, no unit
-test suite, and no build script**: a successful attack run *is* the test.
-
-To run one password end-to-end against the direct variant without the
-harness:
-
-```bash
-# Change the planted secret at runtime
-curl -X POST http://127.0.0.1:8000/set_secret \
-     -H 'Content-Type: application/json' \
-     -d '{"value":"hunter2"}'
-
-# Fire the attack (phase 1: length, phase 2: password — see test_attack.py)
-curl -X POST http://127.0.0.1:9000/run_attack \
-     -H 'Content-Type: application/json' \
-     -d '{"known_prefix":"*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$","alphabet":"0123456789","max_length":4}'
-```
-
-All `/run_attack*` bodies are optional — defaults in `attacker/mitm.py`
-match `README.md`'s documented defaults.
+There is **no lint step and no integration test suite beyond the verify
+/ benchmark scripts** — a successful attack recovery *is* the test.
+Host scripts use stdlib only (`urllib`, `json`) and target
+`http://127.0.0.1:9000` (attacker) and `http://127.0.0.1:8000` (client);
+those ports are mapped only by the default `docker-compose.yml`.
 
 ## Architecture that spans files
 
-**Five services on the `sshpoc` Docker bridge**, wired up by
-`docker-compose.yml`. Container hostnames (`server`, `attacker`, `client`,
-`redis`) are Docker DNS names and are referenced as environment variables
-in both `mitm.py` and `client.py`.
+### Engine + adapter split (the core refactor)
 
-**The client deliberately connects to the attacker, not the server.**
-`client.py` launches `ssh -N -C -v` with `SSH_TARGET_HOST=attacker` and
-`SSH_TARGET_PORT=2222`, but pins the *real* server's host key in
-`known_hosts` using `[attacker]:2222 <server_host_key.pub>`. The attacker's
-`mitm.py` is a dumb passive TCP forwarder between `:2222` and `server:22`
-— it never terminates or decrypts SSH. Any active in-the-middle attempt
-would fail at the SSH layer because of the pinned host key. This is not a
-bug to fix; it's the threat model.
+All three variants share **`attacker/attack/engine.py`** (round loop,
+candidate ranking, alignment sweep, per-position metrics, outlier
+retry). The engine calls one method on the adapter:
 
-**The attacker container does three things in one process** (`mitm.py`):
+```python
+async def measure_once(prefix, candidate, alignment) -> int   # wire-byte count
+```
 
-1. `asyncio.start_server` TCP forwarder on `:2222` → `server:22`.
-2. `scapy.AsyncSniffer` on `eth0` with BPF filter
-   `tcp and (port 22 or port 2222)`, feeding a thread-safe `PacketLog`.
-   Requires `NET_ADMIN` + `NET_RAW` caps (set in `docker-compose.yml`).
-3. `aiohttp` control API on `:9000`, plus the `BrowserBridge` WebSocket
-   for the BEAST variant.
+Transport-specific ordering (flush / open measure channel / trigger
+secret / send guess / read log) lives inside the adapter, not the
+engine. The three adapters:
 
-The HTTP handlers dispatch to `attack.run_attack` (direct) or
-`attack_beast.run_attack` (BEAST). Attack logic is cleanly separated:
+- `attacker/attack/adapters/direct.py` — raw TCP dial to the client's
+  exposed tunnel port (`TUNNEL_PORT`, default 6379). Requires a flush
+  before every measurement.
+- `attacker/attack/adapters/beast.py` — drives the victim's browser
+  over `BrowserBridge` (WebSocket) to call `navigator.sendBeacon()`.
+  Regenerates the flush block on **every** measurement (not per
+  round — a cached flush creates a persistent LZ77 bias that
+  averaging cannot remove).
+- `attacker/attack/adapters/ansible.py` — triggers a fresh
+  `ansible-playbook` run per guess; dials the Ansible `LocalForward`
+  port on the client (`ANSIBLE_TUNNEL_PORT`, default 15432). No
+  flush needed (fresh SSH connection → empty zlib window).
 
-- `attacker/attack.py` — the algorithm: sweep, per-byte recovery with
-  repeat-until-confident, adaptive noise pruning, candidate elimination,
-  stall detection, constant-length prefix trimming. Exports
-  `_sweep_round`, `crack_byte_position`, `run_attack`. This file is also
-  imported by `attack_beast.py` for constants and the generic runner.
-- `attacker/attack_beast.py` — imports `run_attack as _run_attack` and
-  calls it with a custom `sweep_fn` generated by `make_beast_sweep()`.
-  Also defines `BrowserBridge`, the async WebSocket dispatcher that the
-  sweep uses to drive `sendBeacon()`. Sets `adaptive_noise=False` and
-  a higher `min_margin` (64 vs 16).
-- `attacker/mitm.py` — orchestrates everything: owns the `PacketLog` and
-  `BrowserBridge` singletons, parses HTTP bodies, and is the container's
-  `CMD`.
+Adapter selection happens at one place: `handle_run_attack` in
+`attacker/mitm.py:292`. The request body is
+`{"variant": "direct|beast|ansible", "config": {...}}`; each adapter
+exposes a `default_config()` classmethod, and `AttackConfig.overlay()`
+applies caller overrides on top (`attacker/attack/config.py`).
 
-**The client is an OpenSSH subprocess, not a library.** `client.py`
-manages `ssh -N -C -v` as an asyncio subprocess and parses `ssh -v`'s
-stderr to extract the negotiated compression / cipher / MAC. A background
-`_drain_stderr` task consumes the pipe so ssh never blocks on stderr
-buffer fill. To change SSH knobs, edit `_build_ssh_cmd()` in `client.py`,
-not a config file. The client also uses `redis.asyncio` to (a) set the
-initial password via `CONFIG SET requirepass` once the tunnel is up, and
-(b) send `AUTH default <password>` in standard RESP format whenever the
-attacker hits `/send_secret`. Every call opens a fresh `redis.Redis`
-instance so the `AUTH` goes through a fresh redis-py connection — that's
-what the attack is measuring.
+### Why the client connects to the attacker, not the server
 
-**The BEAST exploit page has two copies, and the one that ships to the
-browser lives in `client.py`.** `client.py` defines an inline
-`_EXPLOIT_HTML` string and serves it from `http://localhost:8000/exploit`.
-The headless Chromium (launched by `client.launch_browser()`) navigates
-there — not to the attacker's `/exploit`. This matters: the page must be
-served from `localhost` so that `navigator.sendBeacon('http://localhost:6379', ...)`
-is a local-to-local request, which avoids Chrome's Private Network Access
-restrictions without any browser flags. `attacker/exploit.html` exists and
-is served from the attacker container too, but nothing actually loads it
-during an attack run — if you edit exploit JS, edit `_EXPLOIT_HTML` in
-`client.py`. The JS connects back to the attacker at `ws://attacker:9000/ws`
-for command dispatch.
+The client launches `ssh -N -C -v` with `SSH_TARGET_HOST=attacker`
+and `SSH_TARGET_PORT=2222`, but pins the **real** server's host key
+in `known_hosts`. `attacker/mitm.py` is a passive TCP forwarder
+between `:2222` and `server:22` — it never terminates or decrypts
+SSH. Any active in-the-middle attempt is rejected at the SSH layer
+because of the pinned host key. This is not a bug; it is the threat
+model (passive on-path observer).
 
-**Both exploit pages resolve `attacker` via Docker DNS from inside the
-container's browser context.** The headless Chromium runs in the client
-container and reaches the attacker WebSocket through the Docker bridge
-network — `attacker` is not resolvable from the host.
+### The attacker container does three things in one process
 
-## Load-bearing constants ("three non-obvious knobs" — do not casually change)
+`attacker/mitm.py` owns:
+1. An `asyncio.start_server` TCP forwarder (`:2222` → `server:22`).
+2. A `scapy.AsyncSniffer` on `eth0` feeding a thread-safe
+   `PacketLog`. Requires `NET_ADMIN` + `NET_RAW` caps (set in
+   `docker-compose.yml`).
+3. An `aiohttp` control API on `:9000`, plus a `BrowserBridge`
+   WebSocket used by the BEAST adapter.
 
-These values are explained in detail in `README.md` §"Three non-obvious
-knobs" and in docstrings in `attack.py`. Before changing any of them,
-understand why they are what they are:
+### BEAST exploit page lives in `client.py`, not `attacker/exploit.html`
 
-- **`flush_bytes=33000` and random content** — must exceed zlib's 32 KiB
-  sliding window (`wbits=15`) to evict the previous guess. Must be
-  `secrets.token_bytes` (direct) or `random.choices(range(0x80, 0x100), ...)`
-  (BEAST). An all-zeros or low-entropy flush saturates zlib's hash chain
-  for `\x00\x00\x00` at level 6 and produces sub-optimal compression — the
-  attack stops working. The BEAST variant restricts to 0x80–0xFF so the
-  flush can't LZ77-match against the HTTP request headers that
-  `sendBeacon()` prepends.
-- **Noise bytes = `bytes(range(0x80, 0x90))`** (`_NOISE_POOL` in
-  `attack.py`). Each noise byte must cost *exactly* 8 compressed bits.
-  DEFLATE's fixed Huffman table uses 8-bit codes for literals 0–143, and
-  bytes 0x80–0x8F are (a) all 8-bit literals, (b) mutually distinct (no
-  intra-noise LZ77 matches), and (c) absent from plausible dictionary
-  content (ASCII text, zeros, SSH framing). Do not substitute arbitrary
-  bytes here.
-- **`min_margin`: 16 for direct, 64 for BEAST** — the wire-byte gap between
-  the best and second-best candidate a position must reach before being
-  committed. BEAST is higher because the HTTP-header overhead and
-  browser-side timing jitter add noise.
-- **Constant-length prefix trimming** (in `run_attack`): as each byte is
-  recovered, the head of the known prefix is trimmed to keep
-  `len(prefix + candidate)` constant across positions. Keeps LZ77 match
-  lengths in the same DEFLATE length-code bin and prevents the 8→7-bit
-  signal drop at length-code boundaries. Don't "simplify" by appending
-  without trimming.
-- **Attack ordering in `_sweep_round` (direct)**: flush → open measure
-  channel → trigger secret → send guess. The measure channel is opened
-  *before* the secret so its `CHANNEL_OPEN` lands on the far side of the
-  secret in the LZ77 window. In BEAST, `sendBeacon()` sends
-  `CHANNEL_OPEN` + `CHANNEL_DATA` in one shot, so `_c2s_data_only` filters
-  out segments ≤ 100 bytes to isolate the data packet.
-- **Round-level outlier guard (BEAST only)**: if `max - min > 32` bytes
-  across one round's measurements, the entire round is discarded and
-  re-run. This catches Chrome's TCP-connection reuse anomalies (~400 B
-  header-backreference measurements). Direct variant does not need this.
+`client.py` serves its own inline `_EXPLOIT_HTML` at
+`http://localhost:8000/exploit`. The headless Chromium (launched by
+the client) navigates there — not to the attacker's copy. This is
+deliberate: the page must be served from `localhost` so that
+`sendBeacon('http://localhost:6379', …)` is a local-to-local
+request, bypassing Chrome's Private Network Access restrictions
+without any browser flag. `attacker/exploit.html` exists but is not
+actually loaded during an attack run. **If you edit BEAST JS, edit
+`_EXPLOIT_HTML` in `client.py`.**
 
-## SSH / container specifics
+### Benchmark stack isolation
 
-- Server is Debian bookworm-slim with `openssh-server`. `Compression yes`,
-  `AllowTcpForwarding yes`, `PubkeyAuthentication yes`, `AllowUsers victim`
-  only. The `victim` user is created with `passwd -d` to unlock pubkey
-  auth. Host key is copied from the shared `/keys` read-only volume on
-  container start by `server/entrypoint.sh`.
-- Client and attacker images are `python:3.14-slim`. Client also installs
-  `openssh-client` and Chromium's runtime libs (Chromium itself is pulled
-  via `playwright install chromium` at build time).
-- Keys are generated once by the `poc-keygen` one-shot container (which
-  reuses the server image) into `./keys/`. Both `server` and `client`
-  mount this directory read-only. `scripts/keygen.sh` is the script that
-  runs inside the keygen container; it is idempotent.
-- The wire-size analysis is tuned for `chacha20-poly1305@openssh.com`'s
-  8-byte padding granularity. AES-CTR+HMAC-ETM uses 16-byte boundaries
-  and would require a wider noise sweep (though the underlying signal is
-  the same). The negotiated cipher is visible at
+`scripts/benchmark.py` spawns N independent docker-compose projects
+via the `docker-compose.bench.yml` overlay, which:
+
+- Project-scopes every `container_name` using
+  `${COMPOSE_PROJECT_NAME}`.
+- Drops host port mappings (`ports: !override []`) — the benchmark
+  script dials each attacker / client directly on their docker-bridge
+  IPs, discovered via `docker inspect`.
+- Tags images under `ssh-compression-poc-bench/<service>:latest` so
+  `docker compose build` runs once and subsequent `up`s reuse it.
+
+Results: `benchmark_results.json` (per-trial, per-position detail)
+and `benchmark_summary.csv` (per-`(variant, scenario)` aggregates).
+
+## Editing gotchas
+
+- **Rebuild after Python edits.** `attacker/` and `client/` sources
+  are `COPY`'d at image build time, not bind-mounted. Host scripts
+  won't see changes until the relevant service is rebuilt.
+- **Do not casually change the load-bearing constants.**
+  `flush_bytes=33000`, alignment pool `0x80..0x8F`, the per-variant
+  `min_margin`, the adapter-specific ordering, and `outlier_threshold`
+  are all explained in README §"Load-bearing constants" and in
+  docstrings. Changes here routinely collapse attack throughput.
+- **Terminator must be in the alphabet.** The engine auto-appends
+  `terminator` to `alphabet` if missing (see commit `d1a6c85`); omit
+  at your peril if you bypass the overlay path.
+- **Cipher assumption.** The alignment sweep assumes
+  `chacha20-poly1305@openssh.com`'s 8-byte padding granularity
+  (`alignment_lengths=[0..7]`). AES-CTR+HMAC-ETM would need
+  `[0..15]`; the negotiated cipher is visible at
   `GET http://localhost:8000/status`.
+- **Ansible `fixed_single` mode is the speed knob, not a correctness
+  knob.** After the first position locks the winning alignment
+  length, pinning to it skips the 8× sweep and is ~8× faster. If the
+  sweep fails to lock, the trial fails — don't silently disable the
+  sweep.
 
-## When editing, test by actually running the attack
+## File → purpose quick reference
 
-There is no unit test suite and no lint step. The only meaningful signal
-is whether the attack still recovers the planted secret end-to-end:
-
-- `scripts/verify.py` — fast, checks preconditions (SSH up, compression
-  negotiated, tunnel active, packets observable). Run this after any
-  change to Docker composition, networking, or the client/attacker
-  process lifecycle.
-- `scripts/verify_beast.py` — fast preconditions + one hunter2 BEAST
-  recovery (~20 min). Run this after any change to `attack_beast.py`,
-  `BrowserBridge`, or `_EXPLOIT_HTML`.
-- `scripts/test_attack.py` — runs 5 fixed passwords through the direct
-  variant (~20 min total). Run this after any change to `attack.py`.
-- `scripts/test_attack_random.py` — 50 random passwords, seeded for
-  reproducibility (seed 4253). Full regression; runs much longer.
-
-After editing Python in `attacker/` or `client/`, you must
-`docker compose up -d --build` (or `docker compose build <service> &&
-docker compose up -d <service>`) before the host scripts will see the
-new code — the containers copy source at build time, not bind-mount it.
-If attack throughput collapses or margins never stabilize after a change,
-suspect one of the load-bearing constants above or a regression in the
-sweep ordering.
+- `attacker/attack/engine.py` — round loop, ranking, metrics,
+  `run_attack()` coroutine, and `resolve_stalled_position()` (fork-on-stall
+  fallback). Transport-agnostic.
+- `attacker/attack/config.py` — `AttackConfig`, `AlignmentMode`,
+  `overlay()` for JSON → dataclass marshalling.
+- `attacker/attack/alignment.py` — `_ALIGNMENT_POOL`,
+  `make_alignment()`. The 0x80..0x8F bytes and why.
+- `attacker/attack/adapters/{direct,beast,ansible}.py` — per-variant
+  ordering + `default_config()`.
+- `attacker/attack/adapters/browser_bridge.py` — WebSocket dispatcher
+  used only by BEAST.
+- `attacker/mitm.py` — container `CMD`; forwarder + sniffer +
+  `/run_attack` dispatch.
+- `client/client.py` — SSH subprocess manager, redis-py, Chromium
+  launcher, ansible runner, inline BEAST exploit HTML.
+- `scripts/benchmark.py` — multi-stack scenario harness;
+  `SCENARIO_PRESETS` is the single source of truth for the preset
+  toggle combinations.
+- `scripts/verify_*.py` — per-variant preconditions + one
+  `hunter2` recovery end-to-end.
+- `docs/superpowers/{specs,plans}/` — the design spec and
+  18-task implementation plan behind the unified engine refactor.
