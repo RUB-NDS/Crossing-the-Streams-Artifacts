@@ -436,12 +436,29 @@ def summarise(results: list[dict], variants: list[str]) -> dict:
                 "total": sum(xs),
             }
 
+        # Fork metrics: count positions where fork triggered, sum losers' guesses
+        fork_triggered_positions = 0
+        fork_overhead_guesses = 0
+        for r in passed:
+            for entry in (r.get("phase1_per_position") or []):
+                fi = entry.get("fork_info")
+                if fi and fi.get("triggered"):
+                    fork_triggered_positions += 1
+                    fork_overhead_guesses += fi.get("losers_guesses", 0)
+            for entry in (r.get("phase2_per_position") or []):
+                fi = entry.get("fork_info")
+                if fi and fi.get("triggered"):
+                    fork_triggered_positions += 1
+                    fork_overhead_guesses += fi.get("losers_guesses", 0)
+
         summary[v] = {
             "trials_total": len(vr),
             "trials_passed": len(passed),
             "trials_failed": len(vr) - len(passed),
             "per_attack": stats(per_attack),
             "per_position": stats(per_position_guesses),
+            "fork_triggered_positions": fork_triggered_positions,
+            "fork_overhead_guesses": fork_overhead_guesses,
         }
     return summary
 
@@ -646,6 +663,7 @@ def main() -> int:
                 "per_attack_min", "per_attack_max", "per_attack_avg", "per_attack_total",
                 "per_position_count",
                 "per_position_min", "per_position_max", "per_position_avg",
+                "fork_triggered_positions", "fork_overhead_guesses",
             ])
             for v, s in summary.items():
                 pa = s["per_attack"]
@@ -658,6 +676,7 @@ def main() -> int:
                     pp["count"],
                     pp["min"], pp["max"],
                     f"{pp['avg']:.1f}" if pp["avg"] is not None else "",
+                    s["fork_triggered_positions"], s["fork_overhead_guesses"],
                 ])
         print(f"CSV summary -> {args.csv_summary}")
 
