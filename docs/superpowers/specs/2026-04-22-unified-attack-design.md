@@ -534,6 +534,33 @@ initial dataclass, but intentionally the field to add when Two Tries is
 implemented). Engine logic is isolated to `crack_byte_position`'s round
 body; adding a second oracle mode is an additive change.
 
+## Future work: candidate fork on stall (BEAST signal edge case)
+
+Empirically, BEAST's signal at some byte positions does not cleanly
+separate the correct candidate from one or two near-rivals even after
+the flush-bias fix (regenerating the 33 KB flush per measurement).
+Specifically, at pos 4 of `hunter2` the engine consistently recovers
+`huntc` rather than `hunte` — the zlib stream + HTTP-header combination
+produces a persistent per-round bias that averaging over many rounds
+cannot clear. Raising `min_margin` from 32 toward the legacy 64 does
+not fix this; the bias is in the signal itself, not the confidence
+threshold.
+
+Proposed extension: when `margin` fails to reach `min_margin` within
+`max_rounds` (or a lower "stall gate"), the engine forks both top
+candidates and runs the *next* byte position in parallel for each
+branch. Only the correct branch produces a definitive signal at the
+next position; the wrong branch's signal collapses. This is
+conceptually similar to a one-ply lookahead and handles cases where
+the per-position oracle is ambiguous but the aggregate per-byte-pair
+oracle is not.
+
+This is out of scope for the initial refactor and will be designed /
+implemented as a separate follow-up task. Engine structure should
+preserve an extension point: `crack_byte_position` returns
+`(best, info)`; a fork-aware driver would return `[(best, info),
+(second, info)]` on stall and the outer loop would multiplex.
+
 ## Other literature optimizations reviewed
 
 | Technique | Source | In scope? |
