@@ -13,7 +13,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY mitm.py attack.py attack_beast.py attack_ansible.py exploit.html ./
+COPY mitm.py exploit.html ./
 
 # New unified engine package.  The engine uses `from attacker.attack.*`
 # imports, so we replicate the on-disk layout: /app/attacker/attack/.

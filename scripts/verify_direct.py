@@ -15,7 +15,7 @@ Checks:
   4. attacker can inject a payload through the Redis tunnel -> same
      observation
   5. Inject payload through Redis tunnel and capture packet log
-  6. Direct variant: recover hunter2 through /run_attack_v2 (two-phase
+  6. Direct variant: recover hunter2 through /run_attack (two-phase
      RESP length + password attack)
 """
 
@@ -77,7 +77,7 @@ def _run_attack_v2(variant: str, known_prefix: str, alphabet: str,
         },
     }).encode("utf-8")
     req = urllib.request.Request(
-        f"{ATTACKER_BASE}/run_attack_v2",
+        f"{ATTACKER_BASE}/run_attack",
         method="POST",
         data=body,
         headers={"Content-Type": "application/json"},
@@ -150,7 +150,7 @@ def main() -> int:
         fail("no TCP segments observed during Redis tunnel injection")
     print("  [ok] attacker observed packets while injecting through Redis tunnel")
 
-    step("6. Direct variant: recover hunter2 through /run_attack_v2")
+    step("6. Direct variant: recover hunter2 through /run_attack")
     http("POST", f"{CLIENT_BASE}/set_secret",
          body=json.dumps({"value": "hunter2"}).encode("utf-8"))
     time.sleep(2.0)
@@ -187,7 +187,7 @@ def main() -> int:
     print("  (3) Attacker observes encrypted SSH packet sizes on the wire")
     print("  (4) Attacker can trigger Redis AUTH (secret flows c->s)")
     print("  (5) Attacker can inject data through the Redis tunnel (c->s)")
-    print("  (6) Direct variant recovered 'hunter2' end-to-end via /run_attack_v2")
+    print("  (6) Direct variant recovered 'hunter2' end-to-end via /run_attack")
     print("  Both data flows share a single zlib compression context.")
     return 0
 

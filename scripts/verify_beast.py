@@ -74,7 +74,7 @@ def beast_attack(known_prefix: str, alphabet: str, max_length: int) -> dict:
             "max_length": max_length,
         },
     }).encode("utf-8")
-    return http("POST", f"{ATTACKER_BASE}/run_attack_v2", body=body,
+    return http("POST", f"{ATTACKER_BASE}/run_attack", body=body,
                 content_type="application/json")
 
 

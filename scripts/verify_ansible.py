@@ -162,7 +162,7 @@ def main() -> int:
         },
     }).encode("utf-8")
     t1 = time.time()
-    r1 = http("POST", f"{ATTACKER_BASE}/run_attack_v2",
+    r1 = http("POST", f"{ATTACKER_BASE}/run_attack",
               body=phase1_body, content_type="application/json")
     if not r1.get("ok"):
         fail(f"Phase 1 attack failed: {r1}")
@@ -195,7 +195,7 @@ def main() -> int:
             "alignment_lengths": [1],
         },
     }).encode("utf-8")
-    r2 = http("POST", f"{ATTACKER_BASE}/run_attack_v2",
+    r2 = http("POST", f"{ATTACKER_BASE}/run_attack",
               body=phase2_body, content_type="application/json")
     if not r2.get("ok"):
         fail(f"Phase 2 attack failed: {r2}")
