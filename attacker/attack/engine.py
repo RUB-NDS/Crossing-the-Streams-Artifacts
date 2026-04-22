@@ -78,6 +78,31 @@ def _trimmed_prefix(
     return full
 
 
+def _fork_applicable(
+    config: AttackConfig,
+    position: int,
+    pos_info: dict,
+    depth: int,
+) -> bool:
+    """Return True if fork-on-stall should fire at (position, depth).
+
+    Preconditions (all must hold):
+      - config.candidate_fork_on_stall is True
+      - the position did not cleanly commit
+      - depth < config.max_fork_depth
+      - position + depth + 1 < config.max_length (can still speculate one deeper)
+    """
+    if not config.candidate_fork_on_stall:
+        return False
+    if pos_info.get("clean_commit", False):
+        return False
+    if depth >= config.max_fork_depth:
+        return False
+    if position + depth + 1 >= config.max_length:
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Per-position recovery
 # ---------------------------------------------------------------------------
