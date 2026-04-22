@@ -115,6 +115,9 @@ class AnsibleAdapter:
             flush_bytes=0,
             flush_pool="none",
             measurement_min_segment_size=0,
+            candidate_fork_on_stall=True,
+            fork_top_k=5,
+            max_fork_depth=2,
             label="ansible-default",
         )
 
