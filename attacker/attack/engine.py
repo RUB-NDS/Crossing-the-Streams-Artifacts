@@ -584,29 +584,58 @@ async def run_attack(
             per_position: list[dict[str, Any]] = []
             prev_nl: int | None = None
 
-            for pos in range(config.max_length):
+            position = 0
+            done = False
+            while position < config.max_length and not done:
                 full_prefix = _trimmed_prefix(
                     config.known_prefix, recovered, config,
                 )
-
                 initial_alignment = _select_initial_alignment(config, prev_nl)
+
                 best, pos_info = await crack_byte_position(
                     adapter=adapter,
                     config=config,
                     prefix=full_prefix,
                     initial_alignment=initial_alignment,
-                    log_prefix=f"pos {pos:2d}",
+                    log_prefix=f"pos {position:2d}",
                 )
-                pos_info["position"] = pos
-                per_position.append(pos_info)
-                prev_nl = pos_info["successful_alignment"]
+                pos_info["position"] = position
+                # Downstream consumers may not see these yet (adapter tests
+                # don't touch run_attack), but normalise here for uniformity.
+                pos_info.setdefault("via_fork", False)
+                pos_info.setdefault("fork_origin", None)
+                pos_info.setdefault("fork_info", None)
 
-                if best == config.terminator:
-                    LOG.info("hit terminator at position %d -> done", pos)
-                    break
-                recovered += best
-                LOG.info("recovered so far: %r", recovered.decode("latin-1"))
-            else:
+                if pos_info["clean_commit"] or not _fork_applicable(
+                    config, position, pos_info, depth=0,
+                ):
+                    committed = [pos_info]
+                else:
+                    committed = await resolve_stalled_position(
+                        adapter=adapter,
+                        config=config,
+                        committed_prefix=recovered,
+                        position=position,
+                        stalled_pos_info=pos_info,
+                        alignment_hint=prev_nl,
+                        depth=0,
+                    )
+
+                for pr in committed:
+                    best_byte = pr["best"].encode("latin-1")
+                    per_position.append(pr)
+                    if pr["successful_alignment"] is not None:
+                        prev_nl = pr["successful_alignment"]
+                    if best_byte == config.terminator:
+                        LOG.info("hit terminator at position %d -> done", pr["position"])
+                        done = True
+                        break
+                    recovered += best_byte
+                    LOG.info("recovered so far: %r", recovered.decode("latin-1"))
+
+                position += len(committed)
+
+            if not done and position >= config.max_length:
                 LOG.warning("hit max_length=%d without terminator", config.max_length)
         finally:
             await adapter.teardown()
