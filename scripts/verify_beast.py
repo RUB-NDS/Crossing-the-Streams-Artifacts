@@ -67,11 +67,14 @@ def fail(msg: str) -> "NoReturn":  # type: ignore[name-defined]
 
 def beast_attack(known_prefix: str, alphabet: str, max_length: int) -> dict:
     body = json.dumps({
-        "known_prefix": known_prefix,
-        "alphabet": alphabet,
-        "max_length": max_length,
+        "variant": "beast",
+        "config": {
+            "known_prefix": known_prefix,
+            "alphabet": alphabet,
+            "max_length": max_length,
+        },
     }).encode("utf-8")
-    return http("POST", f"{ATTACKER_BASE}/run_attack_beast", body=body,
+    return http("POST", f"{ATTACKER_BASE}/run_attack", body=body,
                 content_type="application/json")
 
 

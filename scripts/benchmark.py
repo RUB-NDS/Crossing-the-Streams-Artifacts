@@ -14,7 +14,7 @@ On a big machine:
     python scripts/benchmark.py --stacks 32 --trials 100
 
 Reads attack guess counts from the ``total_guesses`` field that
-attacker/attack*.py now includes in every ``/run_attack*`` response.
+attacker/attack/engine.py now includes in every ``/run_attack`` response.
 Writes a detailed JSON dump (``benchmark_results.json``) alongside the
 console summary.
 """
@@ -22,6 +22,7 @@ console summary.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import random
@@ -32,7 +33,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, Callable
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 COMPOSE_FILES = [
@@ -46,6 +47,60 @@ ANSIBLE_PHASE1_PREFIX = "\x5e\x00\x00\x00\x00\x00\x00\x00"
 ANSIBLE_PHASE1_ALPHABET = "".join(chr(i) for i in range(1, 33))
 ANSIBLE_PHASE1_TERMINATOR = "\x00"
 ANSIBLE_PHASE2_TERMINATOR = "\n"
+
+
+# ---------------------------------------------------------------------------
+# Scenario presets
+# ---------------------------------------------------------------------------
+
+SCENARIO_PRESETS: dict[str, dict] = {
+    "baseline": {
+        "alignment_mode": "full_sweep",
+        "candidate_elimination": False,
+        "constant_prefix_trim": True,
+        "adaptive_alignment": False,
+        "stall_detection": False,
+        "alignment_hint_carryover": False,
+    },
+    "full-sweep": {
+        "alignment_mode": "full_sweep",
+        "candidate_elimination": True,
+        "constant_prefix_trim": True,
+        "adaptive_alignment": False,
+        "stall_detection": False,
+        "alignment_hint_carryover": False,
+    },
+    "fixed-nl": {
+        "alignment_mode": "fixed_single",
+        "candidate_elimination": True,
+        "constant_prefix_trim": True,
+        "adaptive_alignment": False,
+        "stall_detection": False,
+        "alignment_hint_carryover": False,
+        # alignment_lengths filled in from --fixed-nl N
+    },
+    "all-opts": {
+        "alignment_mode": "full_sweep",
+        "candidate_elimination": True,
+        "constant_prefix_trim": True,
+        "adaptive_alignment": True,
+        "stall_detection": True,
+        "alignment_hint_carryover": True,
+    },
+}
+
+
+def _build_config_override(scenario: str, fixed_nl: int | None,
+                            label_suffix: str) -> dict:
+    if scenario not in SCENARIO_PRESETS:
+        raise ValueError(f"unknown scenario {scenario!r}")
+    cfg = dict(SCENARIO_PRESETS[scenario])
+    if scenario == "fixed-nl":
+        if fixed_nl is None:
+            raise ValueError("--fixed-nl N is required with --scenario fixed-nl")
+        cfg["alignment_lengths"] = [int(fixed_nl)]
+    cfg["label"] = f"{scenario}{label_suffix}"
+    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -145,21 +200,44 @@ def wait_ready(
 
 
 # ---------------------------------------------------------------------------
-# Per-variant runners (two-phase attacks)
+# Unified runner (replaces legacy per-variant functions and VARIANT_RUNNERS)
 # ---------------------------------------------------------------------------
+
+def _http_run_attack(
+    attacker_base: str,
+    variant: str,
+    config_override: dict,
+    known_prefix: str,
+    alphabet: str,
+    max_length: int,
+    terminator: str | None = None,
+) -> dict:
+    body_cfg = dict(config_override)
+    body_cfg["known_prefix"] = known_prefix
+    body_cfg["alphabet"] = alphabet
+    body_cfg["max_length"] = max_length
+    if terminator is not None:
+        body_cfg["terminator"] = terminator
+    return http(
+        f"{attacker_base}/run_attack",
+        method="POST",
+        body={"variant": variant, "config": body_cfg},
+    )
+
 
 def _run_two_phase(
     attacker_base: str,
-    run_path: str,
+    variant: str,
+    base_config: dict,
     set_secret_url: str,
     password: str,
     phase1_prefix: str,
     phase1_alphabet: str,
     phase1_max: int,
     phase1_terminator: str | None,
-    phase2_prefix_from_phase1: callable,
+    phase2_prefix_from_phase1: Callable,
     phase2_alphabet: str,
-    phase2_max_fn: callable,
+    phase2_max_fn: Callable,
     phase2_terminator: str | None,
     strip_trailing: str,
 ) -> dict:
@@ -169,102 +247,86 @@ def _run_two_phase(
     # before the attack starts measuring.
     time.sleep(1.0)
 
-    body1: dict[str, Any] = {
-        "known_prefix": phase1_prefix,
-        "alphabet": phase1_alphabet,
-        "max_length": phase1_max,
-    }
-    if phase1_terminator is not None:
-        body1["terminator"] = phase1_terminator
-    r1 = http(f"{attacker_base}{run_path}", method="POST", body=body1)
+    r1 = _http_run_attack(
+        attacker_base, variant, base_config,
+        phase1_prefix, phase1_alphabet, phase1_max, phase1_terminator,
+    )
     phase1_recovered = r1["recovered"]
 
-    body2: dict[str, Any] = {
-        "known_prefix": phase2_prefix_from_phase1(phase1_recovered),
-        "alphabet": phase2_alphabet,
-        "max_length": phase2_max_fn(phase1_recovered),
-    }
-    if phase2_terminator is not None:
-        body2["terminator"] = phase2_terminator
-    r2 = http(f"{attacker_base}{run_path}", method="POST", body=body2)
+    r2 = _http_run_attack(
+        attacker_base, variant, base_config,
+        phase2_prefix_from_phase1(phase1_recovered),
+        phase2_alphabet,
+        phase2_max_fn(phase1_recovered),
+        phase2_terminator,
+    )
     recovered = r2["recovered"].rstrip(strip_trailing)
 
     return {
         "recovered": recovered,
         "phase1_guesses": r1.get("total_guesses", -1),
         "phase2_guesses": r2.get("total_guesses", -1),
-        "total_guesses": (
-            r1.get("total_guesses", 0) + r2.get("total_guesses", 0)
-        ),
-        "elapsed": (
-            r1.get("elapsed_seconds", 0.0) + r2.get("elapsed_seconds", 0.0)
-        ),
-        "phase1_raw": phase1_recovered,
+        "total_guesses": r1.get("total_guesses", 0) + r2.get("total_guesses", 0),
+        "elapsed": r1.get("elapsed_seconds", 0) + r2.get("elapsed_seconds", 0),
+        "phase1_per_position": r1.get("per_position", []),
+        "phase2_per_position": r2.get("per_position", []),
     }
 
 
-def run_direct(attacker_base: str, client_base: str, password: str,
-               pw_alphabet: str) -> dict:
-    return _run_two_phase(
-        attacker_base=attacker_base,
-        run_path="/run_attack",
-        set_secret_url=f"{client_base}/set_secret",
-        password=password,
-        phase1_prefix=RESP_PREFIX,
-        phase1_alphabet=LEN_ALPHABET,
-        phase1_max=4,
-        phase1_terminator=None,  # direct defaults to "\r"
-        phase2_prefix_from_phase1=lambda pw_len_str: RESP_PREFIX + pw_len_str + "\r\n",
-        phase2_alphabet=pw_alphabet,
-        phase2_max_fn=lambda pw_len_str: int(pw_len_str) + 4,
-        phase2_terminator=None,
-        strip_trailing="\r",
-    )
-
-
-def run_beast(attacker_base: str, client_base: str, password: str,
-              pw_alphabet: str) -> dict:
-    return _run_two_phase(
-        attacker_base=attacker_base,
-        run_path="/run_attack_beast",
-        set_secret_url=f"{client_base}/set_secret",
-        password=password,
-        phase1_prefix=RESP_PREFIX,
-        phase1_alphabet=LEN_ALPHABET,
-        phase1_max=4,
-        phase1_terminator=None,
-        phase2_prefix_from_phase1=lambda pw_len_str: RESP_PREFIX + pw_len_str + "\r\n",
-        phase2_alphabet=pw_alphabet,
-        phase2_max_fn=lambda pw_len_str: int(pw_len_str) + 4,
-        phase2_terminator=None,
-        strip_trailing="\r",
-    )
-
-
-def run_ansible(attacker_base: str, client_base: str, password: str,
-                pw_alphabet: str) -> dict:
-    return _run_two_phase(
-        attacker_base=attacker_base,
-        run_path="/run_attack_ansible",
-        set_secret_url=f"{client_base}/set_sudo_secret",
-        password=password,
-        phase1_prefix=ANSIBLE_PHASE1_PREFIX,
-        phase1_alphabet=ANSIBLE_PHASE1_ALPHABET,
-        phase1_max=1,
-        phase1_terminator=ANSIBLE_PHASE1_TERMINATOR,
-        phase2_prefix_from_phase1=lambda length_str: ANSIBLE_PHASE1_PREFIX + length_str,
-        phase2_alphabet=pw_alphabet,
-        phase2_max_fn=lambda length_str: len(password) + 4,
-        phase2_terminator=ANSIBLE_PHASE2_TERMINATOR,
-        strip_trailing="\n",
-    )
-
-
-VARIANT_RUNNERS = {
-    "direct": run_direct,
-    "beast": run_beast,
-    "ansible": run_ansible,
-}
+def run_variant(
+    variant: str,
+    base_config: dict,
+    attacker_base: str,
+    client_base: str,
+    password: str,
+    pw_alphabet: str,
+) -> dict:
+    if variant == "direct":
+        return _run_two_phase(
+            attacker_base, "direct", base_config,
+            set_secret_url=f"{client_base}/set_secret",
+            password=password,
+            phase1_prefix=RESP_PREFIX,
+            phase1_alphabet=LEN_ALPHABET,
+            phase1_max=4,
+            phase1_terminator=None,
+            phase2_prefix_from_phase1=lambda s: RESP_PREFIX + s + "\r\n",
+            phase2_alphabet=pw_alphabet,
+            phase2_max_fn=lambda s: int(s) + 4,
+            phase2_terminator=None,
+            strip_trailing="\r",
+        )
+    if variant == "beast":
+        return _run_two_phase(
+            attacker_base, "beast", base_config,
+            set_secret_url=f"{client_base}/set_secret",
+            password=password,
+            phase1_prefix=RESP_PREFIX,
+            phase1_alphabet=LEN_ALPHABET,
+            phase1_max=4,
+            phase1_terminator=None,
+            phase2_prefix_from_phase1=lambda s: RESP_PREFIX + s + "\r\n",
+            phase2_alphabet=pw_alphabet,
+            phase2_max_fn=lambda s: int(s) + 4,
+            phase2_terminator=None,
+            strip_trailing="\r",
+        )
+    if variant == "ansible":
+        return _run_two_phase(
+            attacker_base, "ansible", base_config,
+            set_secret_url=f"{client_base}/set_sudo_secret",
+            password=password,
+            phase1_prefix=ANSIBLE_PHASE1_PREFIX,
+            phase1_alphabet=ANSIBLE_PHASE1_ALPHABET,
+            phase1_max=1,
+            phase1_terminator=ANSIBLE_PHASE1_TERMINATOR,
+            phase2_prefix_from_phase1=lambda length_str: ANSIBLE_PHASE1_PREFIX + length_str,
+            phase2_alphabet=pw_alphabet,
+            phase2_max_fn=lambda length_str: len(password) + 4,
+            phase2_terminator=ANSIBLE_PHASE2_TERMINATOR,
+            strip_trailing="\n",
+        )
+    raise ValueError(f"unknown variant {variant!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +340,7 @@ def worker(
     passwords: list[str],
     variants: list[str],
     pw_alphabet: str,
+    config_override: dict,
     results: list[dict],
     results_lock: threading.Lock,
     failures: list[str],
@@ -303,8 +366,9 @@ def worker(
         for variant in variants:
             t0 = time.time()
             try:
-                runner = VARIANT_RUNNERS[variant]
-                result = runner(attacker_base, client_base, password, pw_alphabet)
+                result = run_variant(variant, config_override,
+                                     attacker_base, client_base,
+                                     password, pw_alphabet)
                 ok = result["recovered"] == password
                 status = "PASS" if ok else f"FAIL(expected={password!r}, got={result['recovered']!r})"
             except Exception as exc:  # noqa: BLE001
@@ -314,6 +378,8 @@ def worker(
                     "phase2_guesses": -1,
                     "total_guesses": -1,
                     "elapsed": 0.0,
+                    "phase1_per_position": [],
+                    "phase2_per_position": [],
                 }
                 ok = False
                 status = f"ERROR: {exc}"
@@ -323,12 +389,15 @@ def worker(
                 "project": project,
                 "trial": trial_idx,
                 "variant": variant,
+                "scenario": config_override.get("label", ""),
                 "password": password,
                 "recovered": result["recovered"],
                 "ok": ok,
                 "total_guesses": result["total_guesses"],
                 "phase1_guesses": result.get("phase1_guesses"),
                 "phase2_guesses": result.get("phase2_guesses"),
+                "phase1_per_position": result.get("phase1_per_position", []),
+                "phase2_per_position": result.get("phase2_per_position", []),
                 "wall_seconds": wall,
                 "status": status,
             }
@@ -340,53 +409,74 @@ def worker(
 
 
 # ---------------------------------------------------------------------------
-# main
+# Summary
 # ---------------------------------------------------------------------------
 
 def summarise(results: list[dict], variants: list[str]) -> dict:
-    summary = {}
+    summary: dict[str, dict] = {}
     for v in variants:
         vr = [r for r in results if r["variant"] == v]
         passed = [r for r in vr if r["ok"]]
-        guesses = [r["total_guesses"] for r in passed]
-        if guesses:
-            summary[v] = {
-                "trials": len(vr),
-                "passed": len(passed),
-                "failed": len(vr) - len(passed),
-                "min_guesses": min(guesses),
-                "max_guesses": max(guesses),
-                "avg_guesses": sum(guesses) / len(guesses),
-                "total_guesses": sum(guesses),
+        per_attack = [r["total_guesses"] for r in passed]
+
+        # Per-position: flatten both phase lists across all passed trials.
+        per_position_guesses: list[int] = []
+        for r in passed:
+            for entry in (r.get("phase1_per_position") or []):
+                per_position_guesses.append(entry["guesses"])
+            for entry in (r.get("phase2_per_position") or []):
+                per_position_guesses.append(entry["guesses"])
+
+        def stats(xs: list[int]) -> dict:
+            return {
+                "count": len(xs),
+                "min": min(xs) if xs else None,
+                "max": max(xs) if xs else None,
+                "avg": (sum(xs) / len(xs)) if xs else None,
+                "total": sum(xs),
             }
-        else:
-            summary[v] = {
-                "trials": len(vr),
-                "passed": 0,
-                "failed": len(vr),
-                "min_guesses": None,
-                "max_guesses": None,
-                "avg_guesses": None,
-                "total_guesses": 0,
-            }
+
+        summary[v] = {
+            "trials_total": len(vr),
+            "trials_passed": len(passed),
+            "trials_failed": len(vr) - len(passed),
+            "per_attack": stats(per_attack),
+            "per_position": stats(per_position_guesses),
+        }
     return summary
 
 
 def print_summary(summary: dict) -> None:
     print()
-    print("=" * 78)
-    print("SUMMARY")
-    print("=" * 78)
-    header = f"{'variant':<10} {'trials':>7} {'passed':>7} {'min':>8} {'max':>8} {'avg':>12} {'total':>14}"
+    print("=" * 96)
+    print("SUMMARY  (per-attack | per-position)")
+    print("=" * 96)
+    header = (
+        f"{'variant':<10} {'passed':>7} "
+        f"{'a.min':>8} {'a.max':>8} {'a.avg':>10} {'a.total':>12} | "
+        f"{'p.min':>6} {'p.max':>6} {'p.avg':>8} {'p.count':>7}"
+    )
     print(header)
     print("-" * len(header))
     for v, s in summary.items():
-        mn = "-" if s["min_guesses"] is None else f"{s['min_guesses']}"
-        mx = "-" if s["max_guesses"] is None else f"{s['max_guesses']}"
-        av = "-" if s["avg_guesses"] is None else f"{s['avg_guesses']:.1f}"
-        print(f"{v:<10} {s['trials']:>7} {s['passed']:>7} "
-              f"{mn:>8} {mx:>8} {av:>12} {s['total_guesses']:>14}")
+        pa = s["per_attack"]
+        pp = s["per_position"]
 
+        def fmt(x, fmt_spec=""):
+            return "-" if x is None else format(x, fmt_spec)
+
+        print(
+            f"{v:<10} {s['trials_passed']:>7} "
+            f"{fmt(pa['min']):>8} {fmt(pa['max']):>8} "
+            f"{fmt(pa['avg'], '.1f'):>10} {pa['total']:>12} | "
+            f"{fmt(pp['min']):>6} {fmt(pp['max']):>6} "
+            f"{fmt(pp['avg'], '.1f'):>8} {pp['count']:>7}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
@@ -412,13 +502,34 @@ def main() -> int:
                     help="do not tear down stacks after benchmark completes")
     ap.add_argument("--output", default="benchmark_results.json",
                     help="path for detailed JSON output")
+    ap.add_argument("--scenario", default="all-opts",
+                    choices=list(SCENARIO_PRESETS.keys()),
+                    help="named optimization preset")
+    ap.add_argument("--fixed-nl", type=int, default=None,
+                    help="required with --scenario fixed-nl: single alignment length")
+    ap.add_argument("--config", default=None,
+                    help="path to raw JSON config override; if set, overrides --scenario")
+    ap.add_argument("--csv-summary", default="benchmark_summary.csv",
+                    help="path for the one-row-per-variant CSV summary")
     args = ap.parse_args()
 
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
     for v in variants:
-        if v not in VARIANT_RUNNERS:
+        if v not in ("direct", "beast", "ansible"):
             print(f"!! unknown variant {v!r}", file=sys.stderr)
             return 2
+
+    if args.config:
+        with open(args.config) as f:
+            config_override = json.load(f)
+        if "label" not in config_override:
+            config_override["label"] = os.path.basename(args.config)
+    else:
+        config_override = _build_config_override(
+            args.scenario, args.fixed_nl,
+            label_suffix=(f"-nl{args.fixed_nl}" if args.scenario == "fixed-nl" else ""),
+        )
+
     rng = random.Random(args.seed)
     passwords = [
         "".join(rng.choices(args.alphabet, k=args.password_length))
@@ -440,6 +551,8 @@ def main() -> int:
     print(f"  alphabet size : {len(args.alphabet)}")
     print(f"  variants      : {variants}")
     print(f"  seed          : {args.seed}")
+    print(f"  scenario      : {args.scenario}")
+    print(f"  config label  : {config_override['label']}")
     print(f"  projects      : {projects[:4]}{' ...' if len(projects) > 4 else ''}")
     print(f"  per-stack load: {[len(a) for a in assignments][:8]}"
           f"{' ...' if args.stacks > 8 else ''}")
@@ -488,7 +601,8 @@ def main() -> int:
             t = threading.Thread(
                 target=worker,
                 args=(i, p, assignments[i], passwords, variants,
-                      args.alphabet, results, results_lock, failures),
+                      args.alphabet, config_override,
+                      results, results_lock, failures),
                 daemon=True,
             )
             t.start()
@@ -515,6 +629,8 @@ def main() -> int:
                     "alphabet": args.alphabet,
                     "variants": variants,
                     "seed": args.seed,
+                    "scenario": args.scenario,
+                    "config_label": config_override["label"],
                 },
                 "passwords": passwords,
                 "results": results,
@@ -523,7 +639,29 @@ def main() -> int:
             }, f, indent=2)
         print(f"\nDetailed results -> {args.output}")
 
-        all_passed = all(s["failed"] == 0 for s in summary.values())
+        with open(args.csv_summary, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow([
+                "variant", "scenario", "trials_passed",
+                "per_attack_min", "per_attack_max", "per_attack_avg", "per_attack_total",
+                "per_position_count",
+                "per_position_min", "per_position_max", "per_position_avg",
+            ])
+            for v, s in summary.items():
+                pa = s["per_attack"]
+                pp = s["per_position"]
+                w.writerow([
+                    v, config_override["label"], s["trials_passed"],
+                    pa["min"], pa["max"],
+                    f"{pa['avg']:.1f}" if pa["avg"] is not None else "",
+                    pa["total"],
+                    pp["count"],
+                    pp["min"], pp["max"],
+                    f"{pp['avg']:.1f}" if pp["avg"] is not None else "",
+                ])
+        print(f"CSV summary -> {args.csv_summary}")
+
+        all_passed = all(s["trials_failed"] == 0 for s in summary.values())
         return 0 if all_passed and not failures else 1
     finally:
         if not args.keep_up and not args.no_up:

