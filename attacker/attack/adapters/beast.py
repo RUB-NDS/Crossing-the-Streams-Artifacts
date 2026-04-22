@@ -75,7 +75,7 @@ class BeastAdapter:
             alphabet=[bytes([c]) for c in b"abcdefghijklmnopqrstuvwxyz0123456789"],
             max_length=32,
             terminator=b"\r",
-            min_margin=64,
+            min_margin=32,
             max_rounds=64,
             settle=0.01,
             alignment_mode=AlignmentMode.FULL_SWEEP,
