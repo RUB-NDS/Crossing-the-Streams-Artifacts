@@ -133,6 +133,27 @@ def _select_fork_branches(
     return branches
 
 
+def _classify_fork_outcome(
+    branch_results: list[tuple[bytes, dict]],
+) -> tuple[str, list[int]]:
+    """Classify a fork round by how many branches cleanly committed.
+
+    Returns one of:
+      ("unique", [winner_idx])   — exactly 1 clean-committed branch
+      ("multi",  [idx1, idx2, ...]) — 2+ clean-committed branches
+      ("zero",   [])              — 0 clean-committed branches
+    """
+    clean_indices = [
+        i for i, (_best, info) in enumerate(branch_results)
+        if info.get("clean_commit", False)
+    ]
+    if len(clean_indices) == 1:
+        return "unique", clean_indices
+    if len(clean_indices) >= 2:
+        return "multi", clean_indices
+    return "zero", []
+
+
 # ---------------------------------------------------------------------------
 # Per-position recovery
 # ---------------------------------------------------------------------------

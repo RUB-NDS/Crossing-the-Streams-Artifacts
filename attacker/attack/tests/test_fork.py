@@ -86,6 +86,57 @@ def test_select_fork_branches_top_k_larger_than_alphabet_is_clipped():
     assert branches == [b"e", b"c"]
 
 
+from attacker.attack.engine import _classify_fork_outcome
+
+
+def _branch_result(clean: bool, best: str = "x") -> tuple:
+    """Minimal (best, pos_info) shape returned by crack_byte_position."""
+    info = {
+        "position": "pos  5",
+        "best": best,
+        "guesses": 100,
+        "rounds": 4,
+        "final_margin": 32 if clean else 4,
+        "successful_alignment": 3,
+        "ranked_top5": [(best, 50)],
+        "clean_commit": clean,
+        "sums": {best: 50},
+    }
+    return best.encode("latin-1"), info
+
+
+def test_classify_fork_outcome_unique_clean():
+    results = [
+        _branch_result(clean=True,  best="r"),
+        _branch_result(clean=False, best="x"),
+        _branch_result(clean=False, best="y"),
+    ]
+    outcome, indices = _classify_fork_outcome(results)
+    assert outcome == "unique"
+    assert indices == [0]
+
+
+def test_classify_fork_outcome_multi_clean():
+    results = [
+        _branch_result(clean=True,  best="r"),
+        _branch_result(clean=True,  best="s"),
+        _branch_result(clean=False, best="x"),
+    ]
+    outcome, indices = _classify_fork_outcome(results)
+    assert outcome == "multi"
+    assert indices == [0, 1]
+
+
+def test_classify_fork_outcome_zero_clean():
+    results = [
+        _branch_result(clean=False, best="r"),
+        _branch_result(clean=False, best="s"),
+    ]
+    outcome, indices = _classify_fork_outcome(results)
+    assert outcome == "zero"
+    assert indices == []
+
+
 if __name__ == "__main__":
     test_fork_applicable_all_preconditions_met()
     test_fork_applicable_config_off()
@@ -96,4 +147,7 @@ if __name__ == "__main__":
     test_select_fork_branches_filters_terminator()
     test_select_fork_branches_fewer_than_two_after_filter_returns_empty()
     test_select_fork_branches_top_k_larger_than_alphabet_is_clipped()
+    test_classify_fork_outcome_unique_clean()
+    test_classify_fork_outcome_multi_clean()
+    test_classify_fork_outcome_zero_clean()
     print("fork tests: ok")
