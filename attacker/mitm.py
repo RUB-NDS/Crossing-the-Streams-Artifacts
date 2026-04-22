@@ -39,6 +39,10 @@ from attack import run_attack as run_crime_attack
 from attack_ansible import run_attack as run_ansible_attack
 from attack_beast import BrowserBridge, run_attack as run_beast_attack
 
+# New unified engine.
+from attacker.attack.engine import run_attack as run_unified_attack
+from attacker.attack.adapters.direct import DirectAdapter
+
 LOG = logging.getLogger("attacker")
 
 SERVER_HOST = os.environ.get("SERVER_HOST", "server")
@@ -439,6 +443,60 @@ async def handle_run_attack_beast(request: web.Request) -> web.Response:
 
 
 # --------------------------------------------------------------------------
+# Unified /run_attack_v2 endpoint — dispatches to the new engine via
+# per-variant adapters. Coexists with the three legacy shim endpoints
+# above until all variants are verified; they're removed in Task 16.
+# --------------------------------------------------------------------------
+
+_ADAPTER_BY_VARIANT: dict[str, Any] = {
+    "direct": DirectAdapter,
+}
+
+
+def _build_adapter(adapter_cls: Any, variant: str) -> Any:
+    if variant == "direct":
+        return adapter_cls(packet_log=PACKET_LOG)
+    # BEAST and Ansible adapters are wired in Tasks 10 and 13.
+    raise NotImplementedError(f"adapter construction not wired for variant {variant!r}")
+
+
+async def handle_run_attack_v2(request: web.Request) -> web.Response:
+    """Unified attack endpoint: /run_attack_v2 with {"variant": ..., "config": {...}}."""
+    body: dict[str, Any] = {}
+    if request.body_exists:
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+    variant = body.get("variant", "direct")
+    overrides = body.get("config", {}) or {}
+
+    adapter_cls = _ADAPTER_BY_VARIANT.get(variant)
+    if adapter_cls is None:
+        return web.json_response(
+            {"ok": False, "error": f"unknown variant {variant!r}"}, status=400,
+        )
+    if variant == "beast" and not BROWSER_BRIDGE.connected:
+        return web.json_response(
+            {"ok": False, "error": "browser not connected"}, status=503,
+        )
+
+    config = adapter_cls.default_config().overlay(overrides)
+    adapter = _build_adapter(adapter_cls, variant)
+
+    LOG.info("HTTP /run_attack_v2: variant=%s label=%r", variant, config.label)
+    try:
+        result = await run_unified_attack(adapter=adapter, config=config)
+    except Exception as exc:  # noqa: BLE001
+        LOG.exception("unified attack failed")
+        return web.json_response(
+            {"ok": False, "error": str(exc), "variant": variant}, status=500,
+        )
+    LOG.info("unified attack done: recovered=%r", result["recovered"])
+    return web.json_response({"ok": True, "variant": variant, **result})
+
+
+# --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
 
@@ -475,6 +533,7 @@ async def main() -> int:
     app.router.add_get("/exploit", handle_exploit)
     app.router.add_get("/ws", handle_ws)
     app.router.add_post("/run_attack_beast", handle_run_attack_beast)
+    app.router.add_post("/run_attack_v2", handle_run_attack_v2)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", HTTP_PORT)
