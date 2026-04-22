@@ -10,6 +10,7 @@ container).
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from typing import Any
@@ -194,6 +195,16 @@ async def run_attack(
     config: AttackConfig,
 ) -> dict[str, Any]:
     import aiohttp  # local import — not needed for host-side helper tests
+
+    # The engine commits a recovered byte when it beats the second-best
+    # candidate by `min_margin`, and a position loop stops only when the
+    # committed byte equals `config.terminator`. For the terminator to
+    # ever be committed it must be in the candidate alphabet, so append
+    # it defensively here. Callers don't have to include it themselves.
+    if config.terminator and config.terminator not in config.alphabet:
+        config = dataclasses.replace(
+            config, alphabet=list(config.alphabet) + [config.terminator],
+        )
 
     LOG.info(
         "run_attack: variant=%s label=%r prefix=%r alphabet=%d max_len=%d "
