@@ -33,7 +33,7 @@ different optimization scenarios on all three variants.
 | **round** | One full pass over (active candidates × active alignment lengths). |
 
 All identifiers follow this terminology: `alignment_lengths`, `alignment_mode`,
-`_ALIGNMENT_POOL`, `_make_alignment`, `adaptive_alignment`,
+`_ALIGNMENT_POOL`, `make_alignment`, `adaptive_alignment`,
 `alignment_hint_carryover`.
 
 ## Architecture
@@ -45,7 +45,7 @@ attacker/
     __init__.py                  # re-exports run_attack, AttackConfig, AlignmentMode
     config.py                    # AttackConfig dataclass + AlignmentMode enum
     engine.py                    # run_attack, crack_byte_position (transport-agnostic)
-    alignment.py                 # _ALIGNMENT_POOL, _make_alignment
+    alignment.py                 # _ALIGNMENT_POOL, make_alignment
     adapters/
       base.py                    # Adapter protocol + shared helpers
       direct.py                  # raw-TCP tunnel, pre-opened measure channel
@@ -232,7 +232,7 @@ for rnd in range(1, max_rounds + 1):
             for c in active_candidates:
                 guesses += 1
                 per_nl[nl][c] = await adapter.measure_once(
-                    prefix, c, _make_alignment(nl),
+                    prefix, c, make_alignment(nl),
                 )
         flat = [v for m in per_nl.values() for v in m.values()]
         if config.outlier_threshold == 0 or max(flat) - min(flat) <= config.outlier_threshold:
@@ -287,7 +287,7 @@ for rnd in range(1, max_rounds + 1):
     if margin >= config.min_margin:
         break
 
-successful_alignment = _pick_nl_with_largest_gap(per_nl, best)
+successful_alignment = _pick_alignment_with_largest_gap(per_nl, best)
 # Returns the nl with the largest `min(others) - best` gap, or None if no
 # nl shows any gap (e.g., only one active candidate left after elimination,
 # or all measurements identical). Carryover falls through to full sweep
