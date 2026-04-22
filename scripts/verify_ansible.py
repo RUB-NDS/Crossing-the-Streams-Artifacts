@@ -30,7 +30,7 @@ ATTACKER_BASE = "http://127.0.0.1:9000"
 CLIENT_BASE = "http://127.0.0.1:8000"
 
 # 8-byte CHANNEL_DATA header prefix for a session-channel packet.  See
-# attacker/attack_ansible.py for the full derivation.
+# attacker/attack/adapters/ansible.py for the full derivation.
 PHASE1_PREFIX = "\x5e\x00\x00\x00\x00\x00\x00\x00"
 # Plausible password length bytes (accounts for up to a 31-char password
 # + trailing \n).  All below 0x80 so UTF-8 encoding is a no-op.

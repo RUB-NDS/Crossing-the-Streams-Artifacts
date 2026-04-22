@@ -52,7 +52,6 @@ HTTP_PORT = int(os.environ.get("HTTP_PORT", "9000"))
 CLIENT_CONTROL_URL = os.environ.get("CLIENT_CONTROL_URL", "http://client:8000")
 CLIENT_HOST = os.environ.get("CLIENT_HOST", "client")
 TUNNEL_PORT = int(os.environ.get("TUNNEL_PORT", "6379"))
-ANSIBLE_TUNNEL_PORT = int(os.environ.get("ANSIBLE_TUNNEL_PORT", "15432"))
 
 SNIFF_FILTER = f"tcp and (port {SERVER_PORT} or port {LISTEN_PORT})"
 SNIFF_IFACE = os.environ.get("SNIFF_IFACE", "eth0")
