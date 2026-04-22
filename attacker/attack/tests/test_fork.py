@@ -304,6 +304,111 @@ def test_resolve_multi_clean_recurses_and_finds_2ply_winner():
     assert result[2]["guesses"] == 100
 
 
+def test_resolve_zero_clean_recurses_with_tentative_parents():
+    original = engine_mod.crack_byte_position
+    # Depth-1: all three branches stall at N+1.
+    # Depth-2: extend each with its best-margin N+1 byte. Only 'e' branch
+    # yields a clean commit at pos 6 -> e is the correct N.
+    fake = _FakeCrack([
+        # Depth-1
+        _branch_result(clean=False, best="r"),  # e's N+1 (best-margin)
+        _branch_result(clean=False, best="q"),  # c's N+1 (best-margin)
+        _branch_result(clean=False, best="z"),  # k's N+1 (best-margin)
+        # Depth-2 (all three recursed with tentative N+1)
+        _branch_result(clean=True,  best="t"),  # e→r→t at pos 6
+        _branch_result(clean=False, best="w"),  # c→q→w at pos 6
+        _branch_result(clean=False, best="v"),  # k→z→v at pos 6
+    ])
+    _install_fake(fake)
+    try:
+        cfg = _cfg(
+            candidate_fork_on_stall=True, fork_top_k=3, max_fork_depth=2,
+            max_length=32, min_margin=16,
+        )
+        stalled = _stalled_info(
+            sums={"e": 100, "c": 112, "k": 120, "s": 200, "r": 210},
+        )
+        result = _run(resolve_stalled_position(
+            adapter=None, config=cfg,
+            committed_prefix=b"hunt", position=4,
+            stalled_pos_info=stalled, alignment_hint=3, depth=0,
+        ))
+    finally:
+        _restore_crack(original)
+
+    assert len(result) == 3
+    assert result[0]["best"] == "e"
+    assert result[0]["fork_info"]["outcome"] == "unique_clean"
+    assert result[0]["fork_info"]["committed_via_fork"] == [5, 6]
+
+
+def test_resolve_zero_clean_no_depth2_winner_falls_back():
+    original = engine_mod.crack_byte_position
+    # Every branch stalls at every depth -> best-margin at N returned
+    fake = _FakeCrack([
+        # Depth-1 (3 stalls)
+        _branch_result(clean=False, best="r"),
+        _branch_result(clean=False, best="q"),
+        _branch_result(clean=False, best="z"),
+        # Depth-2 (3 stalls)
+        _branch_result(clean=False, best="t"),
+        _branch_result(clean=False, best="w"),
+        _branch_result(clean=False, best="v"),
+    ])
+    _install_fake(fake)
+    try:
+        cfg = _cfg(
+            candidate_fork_on_stall=True, fork_top_k=3, max_fork_depth=2,
+            max_length=32, min_margin=16,
+        )
+        stalled = _stalled_info(
+            sums={"e": 100, "c": 112, "k": 120, "s": 200, "r": 210},
+        )
+        result = _run(resolve_stalled_position(
+            adapter=None, config=cfg,
+            committed_prefix=b"hunt", position=4,
+            stalled_pos_info=stalled, alignment_hint=3, depth=0,
+        ))
+    finally:
+        _restore_crack(original)
+
+    # Only 1 dict: origin with best-margin fallback
+    assert len(result) == 1
+    assert result[0]["position"] == 4
+    assert result[0]["best"] == "e"   # best-margin = lowest-sum candidate
+    assert result[0]["fork_info"]["outcome"] == "best_margin_fallback"
+    assert result[0]["fork_info"]["committed_via_fork"] == []
+
+
+def test_resolve_insufficient_branches_skipped():
+    fake = _FakeCrack([])
+    original = engine_mod.crack_byte_position
+    _install_fake(fake)
+    try:
+        cfg = _cfg(
+            candidate_fork_on_stall=True, fork_top_k=2, max_fork_depth=2,
+            max_length=32, min_margin=16, terminator=b"c",
+        )
+        # Top-2 sums: c (100, terminator), e (112) — after filter, just 'e' -> empty
+        # We need only c and e in the sums so that top-2 picks c and e, then
+        # filtering out c (terminator) leaves just e (1 < 2).
+        stalled = _stalled_info(
+            sums={"c": 100, "e": 112},
+        )
+        result = _run(resolve_stalled_position(
+            adapter=None, config=cfg,
+            committed_prefix=b"hunt", position=4,
+            stalled_pos_info=stalled, alignment_hint=3, depth=0,
+        ))
+    finally:
+        _restore_crack(original)
+
+    assert len(result) == 1
+    assert result[0]["fork_info"]["triggered"] is False
+    assert result[0]["fork_info"]["reason"] == "insufficient_branches"
+    assert fake.calls == []
+
+
 if __name__ == "__main__":
     test_fork_applicable_all_preconditions_met()
     test_fork_applicable_config_off()
@@ -319,4 +424,7 @@ if __name__ == "__main__":
     test_classify_fork_outcome_zero_clean()
     test_resolve_unique_winner_commits_two_positions()
     test_resolve_multi_clean_recurses_and_finds_2ply_winner()
+    test_resolve_zero_clean_recurses_with_tentative_parents()
+    test_resolve_zero_clean_no_depth2_winner_falls_back()
+    test_resolve_insufficient_branches_skipped()
     print("fork tests: ok")
