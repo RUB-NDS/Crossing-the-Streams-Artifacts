@@ -43,6 +43,7 @@ from attack_beast import BrowserBridge, run_attack as run_beast_attack
 from attacker.attack.engine import run_attack as run_unified_attack
 from attacker.attack.adapters.direct import DirectAdapter
 from attacker.attack.adapters.beast import BeastAdapter
+from attacker.attack.adapters.ansible import AnsibleAdapter
 
 LOG = logging.getLogger("attacker")
 
@@ -452,6 +453,7 @@ async def handle_run_attack_beast(request: web.Request) -> web.Response:
 _ADAPTER_BY_VARIANT: dict[str, Any] = {
     "direct": DirectAdapter,
     "beast": BeastAdapter,
+    "ansible": AnsibleAdapter,
 }
 
 
@@ -460,7 +462,8 @@ def _build_adapter(adapter_cls: Any, variant: str) -> Any:
         return adapter_cls(packet_log=PACKET_LOG)
     if variant == "beast":
         return adapter_cls(packet_log=PACKET_LOG, bridge=BROWSER_BRIDGE)
-    # Ansible wired in Task 13.
+    if variant == "ansible":
+        return adapter_cls(packet_log=PACKET_LOG)
     raise NotImplementedError(f"adapter construction not wired for variant {variant!r}")
 
 
