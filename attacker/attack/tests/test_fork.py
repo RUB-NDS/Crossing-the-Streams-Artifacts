@@ -289,6 +289,20 @@ def test_resolve_multi_clean_recurses_and_finds_2ply_winner():
     assert result[2]["via_fork"] is True
     assert result[2]["fork_origin"] == 4
 
+    # Numeric accounting (depth-2 unique winner):
+    # Stall (4000) + depth-1 losers (c: 100, k: 100) + depth-2 loser (c→q: 100) = 4300
+    assert result[0]["guesses"] == 4300
+    # Losers = all non-winner branches at both depths (c, k at d1 + c→q at d2) = 300
+    assert result[0]["fork_info"]["losers_guesses"] == 300
+    # All branches at all depths (3 × 100 + 2 × 100) = 500
+    assert result[0]["fork_info"]["total_fork_guesses"] == 500
+    # 3 depth-1 branches + 2 depth-2 branches = 5
+    assert result[0]["fork_info"]["branches_run"] == 5
+    # Winner's depth-1 work = 100
+    assert result[1]["guesses"] == 100
+    # Winner's depth-2 work = 100
+    assert result[2]["guesses"] == 100
+
 
 if __name__ == "__main__":
     test_fork_applicable_all_preconditions_met()

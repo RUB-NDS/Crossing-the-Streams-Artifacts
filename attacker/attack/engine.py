@@ -203,10 +203,6 @@ async def resolve_stalled_position(
 
     outcome, clean_indices = _classify_fork_outcome(branch_results)
 
-    losers_guesses = sum(
-        info["guesses"] for i, (_b, info) in enumerate(branch_results)
-        if i not in clean_indices
-    )
     total_fork_guesses = sum(info["guesses"] for _b, info in branch_results)
 
     if outcome == "unique":
