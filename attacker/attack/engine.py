@@ -12,14 +12,11 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from attacker.attack.adapters.base import Adapter
 from attacker.attack.alignment import make_alignment
 from attacker.attack.config import AttackConfig, AlignmentMode
-
-if TYPE_CHECKING:
-    import aiohttp
 
 LOG = logging.getLogger("attack.engine")
 
@@ -92,7 +89,9 @@ async def crack_byte_position(
 
     for rnd in range(1, config.max_rounds + 1):
         # One round with outlier-retry. If outlier_threshold == 0 we take
-        # the first pass unconditionally.
+        # the first pass unconditionally. `guesses` counts every oracle
+        # query, including those in discarded outlier rounds, because the
+        # on-wire cost of the attack is what scenario benchmarks compare.
         while True:
             per_nl = {nl: {} for nl in active_alignment}
             for nl in active_alignment:

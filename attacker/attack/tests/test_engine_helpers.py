@@ -55,6 +55,12 @@ def test_select_initial_alignment_full_sweep_with_hint():
     assert _select_initial_alignment(cfg, prev_nl=3) == [3]
 
 
+def test_select_initial_alignment_hint_out_of_set_falls_back():
+    # If prev_nl isn't in the configured alignment set, full sweep is used.
+    cfg = _cfg(alignment_hint_carryover=True, alignment_lengths=[0, 2, 4])
+    assert _select_initial_alignment(cfg, prev_nl=3) == [0, 2, 4]
+
+
 if __name__ == "__main__":
     test_pick_alignment_returns_nl_with_largest_gap()
     test_pick_alignment_returns_none_when_no_gap()
@@ -62,4 +68,5 @@ if __name__ == "__main__":
     test_select_initial_alignment_fixed_single()
     test_select_initial_alignment_full_sweep_no_hint()
     test_select_initial_alignment_full_sweep_with_hint()
+    test_select_initial_alignment_hint_out_of_set_falls_back()
     print("engine-helper tests: ok")
