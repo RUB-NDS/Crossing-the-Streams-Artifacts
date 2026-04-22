@@ -190,6 +190,7 @@ async def crack_byte_position(
 
     successful_alignment = _pick_alignment_with_largest_gap(per_nl, best)
     ranked_all = sorted(config.alphabet, key=lambda c: sums[c])
+    clean_commit = margin >= config.min_margin
     return best, {
         "position": log_prefix,
         "best": best.decode("latin-1"),
@@ -200,6 +201,8 @@ async def crack_byte_position(
         "ranked_top5": [
             (c.decode("latin-1"), sums[c]) for c in ranked_all[:5]
         ],
+        "clean_commit": clean_commit,
+        "sums": {c.decode("latin-1"): sums[c] for c in ranked_all},
     }
 
 
