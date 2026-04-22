@@ -103,6 +103,36 @@ def _fork_applicable(
     return True
 
 
+def _select_fork_branches(
+    pos_info: dict,
+    top_k: int,
+    terminator: bytes,
+) -> list[bytes]:
+    """Pick fork-branch candidates from a stalled position's sums.
+
+    Returns the top-K candidates by ascending sums (lowest = most likely
+    correct), with the terminator byte filtered out. Returns an empty list
+    if fewer than 2 candidates remain after filtering — the caller should
+    treat this as "fork not applicable, use best-margin fallback."
+    """
+    sums: dict[str, int] = pos_info["sums"]
+    # Sort by ascending value
+    ranked = sorted(sums.items(), key=lambda kv: kv[1])
+    terminator_str = terminator.decode("latin-1")
+
+    # Collect candidates, filtering out the terminator, until we have top_k
+    branches = []
+    for key, _sum in ranked:
+        if key != terminator_str:
+            branches.append(key.encode("latin-1"))
+        if len(branches) >= top_k:
+            break
+
+    if len(branches) < 2:
+        return []
+    return branches
+
+
 # ---------------------------------------------------------------------------
 # Per-position recovery
 # ---------------------------------------------------------------------------

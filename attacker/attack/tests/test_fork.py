@@ -52,10 +52,48 @@ def test_fork_applicable_false_on_clean_commit():
     assert _fork_applicable(cfg, position=4, pos_info=info, depth=0) is False
 
 
+from attacker.attack.engine import _select_fork_branches
+
+
+def test_select_fork_branches_top_k_by_sums_ascending():
+    info = _stalled_info(
+        sums={"e": 100, "c": 112, "k": 120, "s": 125, "r": 128, "a": 200},
+    )
+    # top-3 by ascending sums, no terminator filter here
+    branches = _select_fork_branches(info, top_k=3, terminator=b"\n")
+    assert branches == [b"e", b"c", b"k"]
+
+
+def test_select_fork_branches_filters_terminator():
+    # 'e' is the top candidate but is the terminator — filter it out
+    info = _stalled_info(
+        sums={"e": 100, "c": 112, "k": 120, "s": 125, "r": 128},
+    )
+    branches = _select_fork_branches(info, top_k=3, terminator=b"e")
+    assert branches == [b"c", b"k", b"s"]
+
+
+def test_select_fork_branches_fewer_than_two_after_filter_returns_empty():
+    # Top-2 with terminator removing one leaves one candidate -> empty
+    info = _stalled_info(sums={"e": 100, "c": 112})
+    branches = _select_fork_branches(info, top_k=2, terminator=b"e")
+    assert branches == []
+
+
+def test_select_fork_branches_top_k_larger_than_alphabet_is_clipped():
+    info = _stalled_info(sums={"e": 100, "c": 112})
+    branches = _select_fork_branches(info, top_k=10, terminator=b"\n")
+    assert branches == [b"e", b"c"]
+
+
 if __name__ == "__main__":
     test_fork_applicable_all_preconditions_met()
     test_fork_applicable_config_off()
     test_fork_applicable_at_depth_cap()
     test_fork_applicable_at_position_boundary()
     test_fork_applicable_false_on_clean_commit()
+    test_select_fork_branches_top_k_by_sums_ascending()
+    test_select_fork_branches_filters_terminator()
+    test_select_fork_branches_fewer_than_two_after_filter_returns_empty()
+    test_select_fork_branches_top_k_larger_than_alphabet_is_clipped()
     print("fork tests: ok")
