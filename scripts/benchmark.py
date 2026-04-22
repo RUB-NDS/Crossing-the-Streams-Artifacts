@@ -1,0 +1,542 @@
+"""Benchmark the three attack variants (direct / BEAST / Ansible).
+
+Parallelises independent docker-compose projects.  Each stack is fully
+isolated: its own bridge network, its own containers, its own scapy
+sniffer.  The benchmark script dials each stack's attacker and client
+directly on their docker-bridge IPs -- no host port mapping needed.
+
+Usage:
+
+    python scripts/benchmark.py --stacks 4 --trials 100
+
+On a big machine:
+
+    python scripts/benchmark.py --stacks 32 --trials 100
+
+Reads attack guess counts from the ``total_guesses`` field that
+attacker/attack*.py now includes in every ``/run_attack*`` response.
+Writes a detailed JSON dump (``benchmark_results.json``) alongside the
+console summary.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import string
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from typing import Any
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+COMPOSE_FILES = [
+    "-f", os.path.join(ROOT, "docker-compose.yml"),
+    "-f", os.path.join(ROOT, "docker-compose.bench.yml"),
+]
+
+RESP_PREFIX = "*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$"
+LEN_ALPHABET = "0123456789"
+ANSIBLE_PHASE1_PREFIX = "\x5e\x00\x00\x00\x00\x00\x00\x00"
+ANSIBLE_PHASE1_ALPHABET = "".join(chr(i) for i in range(1, 33))
+ANSIBLE_PHASE1_TERMINATOR = "\x00"
+ANSIBLE_PHASE2_TERMINATOR = "\n"
+
+
+# ---------------------------------------------------------------------------
+# HTTP helper (blocking, stdlib only)
+# ---------------------------------------------------------------------------
+
+def http(
+    url: str,
+    method: str = "GET",
+    body: Any = None,
+    timeout: float = 7200.0,
+) -> dict:
+    data = None
+    headers = {}
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, method=method, data=data, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read()
+    return json.loads(raw) if raw else {}
+
+
+# ---------------------------------------------------------------------------
+# Docker compose driver
+# ---------------------------------------------------------------------------
+
+def _compose(project: str, *args: str, capture: bool = False) -> subprocess.CompletedProcess:
+    env = {**os.environ, "COMPOSE_PROJECT_NAME": project}
+    cmd = ["docker", "compose", *COMPOSE_FILES, *args]
+    return subprocess.run(
+        cmd, env=env, check=True,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+    )
+
+
+def build_images(project: str) -> None:
+    """Build once, against the first project -- image tags are shared
+    across all projects so subsequent ``up`` calls reuse the build.
+    """
+    print(f"[build] building images via project {project!r} ...", flush=True)
+    _compose(project, "build")
+    print("[build] done", flush=True)
+
+
+def up_stack(project: str) -> None:
+    _compose(project, "up", "-d")
+
+
+def down_stack(project: str) -> None:
+    try:
+        _compose(project, "down", "-v")
+    except subprocess.CalledProcessError as exc:
+        print(f"[{project}] down failed: {exc}", flush=True)
+
+
+def inspect_ip(container: str) -> str:
+    out = subprocess.check_output(
+        ["docker", "inspect", container,
+         "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}"]
+    )
+    ip = out.decode().strip()
+    if not ip:
+        raise RuntimeError(f"no IP for container {container!r}")
+    return ip
+
+
+# ---------------------------------------------------------------------------
+# Readiness polling
+# ---------------------------------------------------------------------------
+
+def wait_ready(
+    attacker_base: str,
+    client_base: str,
+    need_browser: bool,
+    timeout: float = 240.0,
+) -> None:
+    deadline = time.time() + timeout
+    last = "<no response yet>"
+    while time.time() < deadline:
+        try:
+            cs = http(f"{client_base}/status", timeout=5)
+            http(f"{attacker_base}/status", timeout=5)
+            ssh_ok = bool(cs.get("ssh_connected"))
+            redis_ok = bool(
+                cs.get("port_forwards", {}).get("redis_tunnel", {}).get("active")
+            )
+            browser_ok = bool(cs.get("browser_connected"))
+            last = f"ssh={ssh_ok} redis_tunnel={redis_ok} browser={browser_ok}"
+            if ssh_ok and redis_ok and (not need_browser or browser_ok):
+                return
+        except Exception as exc:  # noqa: BLE001
+            last = f"poll error: {exc}"
+        time.sleep(2.0)
+    raise RuntimeError(f"stack not ready after {timeout:.0f}s: {last}")
+
+
+# ---------------------------------------------------------------------------
+# Per-variant runners (two-phase attacks)
+# ---------------------------------------------------------------------------
+
+def _run_two_phase(
+    attacker_base: str,
+    run_path: str,
+    set_secret_url: str,
+    password: str,
+    phase1_prefix: str,
+    phase1_alphabet: str,
+    phase1_max: int,
+    phase1_terminator: str | None,
+    phase2_prefix_from_phase1: callable,
+    phase2_alphabet: str,
+    phase2_max_fn: callable,
+    phase2_terminator: str | None,
+    strip_trailing: str,
+) -> dict:
+    # Reset secret via client's set-secret endpoint.
+    http(set_secret_url, method="POST", body={"value": password})
+    # Small settle so the client's "set secret" reaches the server
+    # before the attack starts measuring.
+    time.sleep(1.0)
+
+    body1: dict[str, Any] = {
+        "known_prefix": phase1_prefix,
+        "alphabet": phase1_alphabet,
+        "max_length": phase1_max,
+    }
+    if phase1_terminator is not None:
+        body1["terminator"] = phase1_terminator
+    r1 = http(f"{attacker_base}{run_path}", method="POST", body=body1)
+    phase1_recovered = r1["recovered"]
+
+    body2: dict[str, Any] = {
+        "known_prefix": phase2_prefix_from_phase1(phase1_recovered),
+        "alphabet": phase2_alphabet,
+        "max_length": phase2_max_fn(phase1_recovered),
+    }
+    if phase2_terminator is not None:
+        body2["terminator"] = phase2_terminator
+    r2 = http(f"{attacker_base}{run_path}", method="POST", body=body2)
+    recovered = r2["recovered"].rstrip(strip_trailing)
+
+    return {
+        "recovered": recovered,
+        "phase1_guesses": r1.get("total_guesses", -1),
+        "phase2_guesses": r2.get("total_guesses", -1),
+        "total_guesses": (
+            r1.get("total_guesses", 0) + r2.get("total_guesses", 0)
+        ),
+        "elapsed": (
+            r1.get("elapsed_seconds", 0.0) + r2.get("elapsed_seconds", 0.0)
+        ),
+        "phase1_raw": phase1_recovered,
+    }
+
+
+def run_direct(attacker_base: str, client_base: str, password: str,
+               pw_alphabet: str) -> dict:
+    return _run_two_phase(
+        attacker_base=attacker_base,
+        run_path="/run_attack",
+        set_secret_url=f"{client_base}/set_secret",
+        password=password,
+        phase1_prefix=RESP_PREFIX,
+        phase1_alphabet=LEN_ALPHABET,
+        phase1_max=4,
+        phase1_terminator=None,  # direct defaults to "\r"
+        phase2_prefix_from_phase1=lambda pw_len_str: RESP_PREFIX + pw_len_str + "\r\n",
+        phase2_alphabet=pw_alphabet,
+        phase2_max_fn=lambda pw_len_str: int(pw_len_str) + 4,
+        phase2_terminator=None,
+        strip_trailing="\r",
+    )
+
+
+def run_beast(attacker_base: str, client_base: str, password: str,
+              pw_alphabet: str) -> dict:
+    return _run_two_phase(
+        attacker_base=attacker_base,
+        run_path="/run_attack_beast",
+        set_secret_url=f"{client_base}/set_secret",
+        password=password,
+        phase1_prefix=RESP_PREFIX,
+        phase1_alphabet=LEN_ALPHABET,
+        phase1_max=4,
+        phase1_terminator=None,
+        phase2_prefix_from_phase1=lambda pw_len_str: RESP_PREFIX + pw_len_str + "\r\n",
+        phase2_alphabet=pw_alphabet,
+        phase2_max_fn=lambda pw_len_str: int(pw_len_str) + 4,
+        phase2_terminator=None,
+        strip_trailing="\r",
+    )
+
+
+def run_ansible(attacker_base: str, client_base: str, password: str,
+                pw_alphabet: str) -> dict:
+    return _run_two_phase(
+        attacker_base=attacker_base,
+        run_path="/run_attack_ansible",
+        set_secret_url=f"{client_base}/set_sudo_secret",
+        password=password,
+        phase1_prefix=ANSIBLE_PHASE1_PREFIX,
+        phase1_alphabet=ANSIBLE_PHASE1_ALPHABET,
+        phase1_max=1,
+        phase1_terminator=ANSIBLE_PHASE1_TERMINATOR,
+        phase2_prefix_from_phase1=lambda length_str: ANSIBLE_PHASE1_PREFIX + length_str,
+        phase2_alphabet=pw_alphabet,
+        phase2_max_fn=lambda length_str: len(password) + 4,
+        phase2_terminator=ANSIBLE_PHASE2_TERMINATOR,
+        strip_trailing="\n",
+    )
+
+
+VARIANT_RUNNERS = {
+    "direct": run_direct,
+    "beast": run_beast,
+    "ansible": run_ansible,
+}
+
+
+# ---------------------------------------------------------------------------
+# Per-stack worker (one thread per stack, trials sequential within)
+# ---------------------------------------------------------------------------
+
+def worker(
+    stack_idx: int,
+    project: str,
+    trial_indices: list[int],
+    passwords: list[str],
+    variants: list[str],
+    pw_alphabet: str,
+    results: list[dict],
+    results_lock: threading.Lock,
+    failures: list[str],
+) -> None:
+    tag = f"[stack {stack_idx:02d} {project}]"
+    try:
+        attacker_ip = inspect_ip(f"{project}-attacker")
+        client_ip = inspect_ip(f"{project}-client")
+        attacker_base = f"http://{attacker_ip}:9000"
+        client_base = f"http://{client_ip}:8000"
+        need_browser = "beast" in variants
+        print(f"{tag} waiting for readiness at {attacker_base} / {client_base}"
+              f" (browser={'yes' if need_browser else 'no'})", flush=True)
+        wait_ready(attacker_base, client_base, need_browser=need_browser)
+        print(f"{tag} ready; {len(trial_indices)} trial(s) assigned", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"{tag} SETUP FAILED: {exc}", flush=True)
+        failures.append(f"{project}: setup: {exc}")
+        return
+
+    for trial_idx in trial_indices:
+        password = passwords[trial_idx]
+        for variant in variants:
+            t0 = time.time()
+            try:
+                runner = VARIANT_RUNNERS[variant]
+                result = runner(attacker_base, client_base, password, pw_alphabet)
+                ok = result["recovered"] == password
+                status = "PASS" if ok else f"FAIL(expected={password!r}, got={result['recovered']!r})"
+            except Exception as exc:  # noqa: BLE001
+                result = {
+                    "recovered": f"<error: {exc}>",
+                    "phase1_guesses": -1,
+                    "phase2_guesses": -1,
+                    "total_guesses": -1,
+                    "elapsed": 0.0,
+                }
+                ok = False
+                status = f"ERROR: {exc}"
+            wall = time.time() - t0
+            row = {
+                "stack": stack_idx,
+                "project": project,
+                "trial": trial_idx,
+                "variant": variant,
+                "password": password,
+                "recovered": result["recovered"],
+                "ok": ok,
+                "total_guesses": result["total_guesses"],
+                "phase1_guesses": result.get("phase1_guesses"),
+                "phase2_guesses": result.get("phase2_guesses"),
+                "wall_seconds": wall,
+                "status": status,
+            }
+            with results_lock:
+                results.append(row)
+            print(f"{tag} trial={trial_idx:3d} variant={variant:7s} "
+                  f"guesses={result['total_guesses']:>7} wall={wall:6.1f}s  {status}",
+                  flush=True)
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+def summarise(results: list[dict], variants: list[str]) -> dict:
+    summary = {}
+    for v in variants:
+        vr = [r for r in results if r["variant"] == v]
+        passed = [r for r in vr if r["ok"]]
+        guesses = [r["total_guesses"] for r in passed]
+        if guesses:
+            summary[v] = {
+                "trials": len(vr),
+                "passed": len(passed),
+                "failed": len(vr) - len(passed),
+                "min_guesses": min(guesses),
+                "max_guesses": max(guesses),
+                "avg_guesses": sum(guesses) / len(guesses),
+                "total_guesses": sum(guesses),
+            }
+        else:
+            summary[v] = {
+                "trials": len(vr),
+                "passed": 0,
+                "failed": len(vr),
+                "min_guesses": None,
+                "max_guesses": None,
+                "avg_guesses": None,
+                "total_guesses": 0,
+            }
+    return summary
+
+
+def print_summary(summary: dict) -> None:
+    print()
+    print("=" * 78)
+    print("SUMMARY")
+    print("=" * 78)
+    header = f"{'variant':<10} {'trials':>7} {'passed':>7} {'min':>8} {'max':>8} {'avg':>12} {'total':>14}"
+    print(header)
+    print("-" * len(header))
+    for v, s in summary.items():
+        mn = "-" if s["min_guesses"] is None else f"{s['min_guesses']}"
+        mx = "-" if s["max_guesses"] is None else f"{s['max_guesses']}"
+        av = "-" if s["avg_guesses"] is None else f"{s['avg_guesses']:.1f}"
+        print(f"{v:<10} {s['trials']:>7} {s['passed']:>7} "
+              f"{mn:>8} {mx:>8} {av:>12} {s['total_guesses']:>14}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--stacks", type=int, default=4,
+                    help="number of parallel docker-compose projects")
+    ap.add_argument("--trials", type=int, default=100,
+                    help="total number of passwords to attack per variant")
+    ap.add_argument("--password-length", type=int, default=8,
+                    help="password length (excluding terminator)")
+    ap.add_argument("--seed", type=int, default=4253,
+                    help="RNG seed for password generation (reproducible)")
+    ap.add_argument("--alphabet", default=string.ascii_lowercase,
+                    help="password alphabet (default: lowercase ASCII)")
+    ap.add_argument("--variants", default="direct,beast,ansible",
+                    help="comma-separated subset of {direct,beast,ansible}")
+    ap.add_argument("--prefix", default="bench",
+                    help="compose-project-name prefix (one per stack)")
+    ap.add_argument("--no-build", action="store_true",
+                    help="skip image build (images already present)")
+    ap.add_argument("--no-up", action="store_true",
+                    help="skip compose up (stacks already running under --prefix)")
+    ap.add_argument("--keep-up", action="store_true",
+                    help="do not tear down stacks after benchmark completes")
+    ap.add_argument("--output", default="benchmark_results.json",
+                    help="path for detailed JSON output")
+    args = ap.parse_args()
+
+    variants = [v.strip() for v in args.variants.split(",") if v.strip()]
+    for v in variants:
+        if v not in VARIANT_RUNNERS:
+            print(f"!! unknown variant {v!r}", file=sys.stderr)
+            return 2
+    rng = random.Random(args.seed)
+    passwords = [
+        "".join(rng.choices(args.alphabet, k=args.password_length))
+        for _ in range(args.trials)
+    ]
+    projects = [f"{args.prefix}-{i}" for i in range(args.stacks)]
+
+    # Round-robin distribution so every stack has near-equal load.
+    assignments: list[list[int]] = [[] for _ in range(args.stacks)]
+    for i in range(args.trials):
+        assignments[i % args.stacks].append(i)
+
+    print("=" * 78)
+    print("BENCHMARK")
+    print("=" * 78)
+    print(f"  stacks        : {args.stacks}")
+    print(f"  trials        : {args.trials}")
+    print(f"  pw length     : {args.password_length}")
+    print(f"  alphabet size : {len(args.alphabet)}")
+    print(f"  variants      : {variants}")
+    print(f"  seed          : {args.seed}")
+    print(f"  projects      : {projects[:4]}{' ...' if len(projects) > 4 else ''}")
+    print(f"  per-stack load: {[len(a) for a in assignments][:8]}"
+          f"{' ...' if args.stacks > 8 else ''}")
+    print(f"  first 5 pws   : {passwords[:5]}")
+
+    up_errors: list[str] = []
+    try:
+        if not args.no_up:
+            if not args.no_build:
+                print("\n=== Building images (once) ===")
+                try:
+                    build_images(projects[0])
+                except subprocess.CalledProcessError as exc:
+                    print(f"!! build failed: {exc}")
+                    return 3
+
+            print("\n=== Bringing up stacks ===")
+            up_threads = []
+            for p in projects:
+                def _up(project=p) -> None:
+                    try:
+                        up_stack(project)
+                        print(f"[{project}] up", flush=True)
+                    except subprocess.CalledProcessError as exc:
+                        up_errors.append(f"{project}: {exc}")
+                        print(f"[{project}] UP FAILED: {exc}", flush=True)
+                t = threading.Thread(target=_up, daemon=True)
+                t.start()
+                up_threads.append(t)
+            for t in up_threads:
+                t.join()
+
+            if up_errors:
+                print("!! some stacks failed to come up, aborting")
+                for e in up_errors:
+                    print(f"  {e}")
+                return 3
+
+        print("\n=== Running trials ===")
+        results: list[dict] = []
+        results_lock = threading.Lock()
+        failures: list[str] = []
+        worker_threads = []
+        started = time.time()
+        for i, p in enumerate(projects):
+            t = threading.Thread(
+                target=worker,
+                args=(i, p, assignments[i], passwords, variants,
+                      args.alphabet, results, results_lock, failures),
+                daemon=True,
+            )
+            t.start()
+            worker_threads.append(t)
+        for t in worker_threads:
+            t.join()
+        wall = time.time() - started
+
+        print(f"\n=== All trials done in {wall:.1f}s ===")
+        if failures:
+            print("!! some stacks failed:")
+            for f in failures:
+                print(f"  {f}")
+
+        summary = summarise(results, variants)
+        print_summary(summary)
+
+        with open(args.output, "w") as f:
+            json.dump({
+                "config": {
+                    "stacks": args.stacks,
+                    "trials": args.trials,
+                    "password_length": args.password_length,
+                    "alphabet": args.alphabet,
+                    "variants": variants,
+                    "seed": args.seed,
+                },
+                "passwords": passwords,
+                "results": results,
+                "summary": summary,
+                "wall_seconds": wall,
+            }, f, indent=2)
+        print(f"\nDetailed results -> {args.output}")
+
+        all_passed = all(s["failed"] == 0 for s in summary.values())
+        return 0 if all_passed and not failures else 1
+    finally:
+        if not args.keep_up and not args.no_up:
+            print("\n=== Tearing down stacks ===")
+            down_threads = []
+            for p in projects:
+                t = threading.Thread(target=down_stack, args=(p,), daemon=True)
+                t.start()
+                down_threads.append(t)
+            for t in down_threads:
+                t.join()
+            print("tear-down complete")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

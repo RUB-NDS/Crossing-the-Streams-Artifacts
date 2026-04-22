@@ -1,0 +1,31 @@
+# Benchmark override: lets N independent compose projects coexist on
+# one host by project-scoping every container_name and dropping the
+# hardcoded host-port mappings (the benchmark script dials each
+# project's attacker/client directly on their docker-bridge IPs).
+#
+# Explicit `image:` tags make all projects share the same built image
+# so `docker compose build` only has to run once, not N times.
+#
+# Usage:
+#   COMPOSE_PROJECT_NAME=bench-0 \
+#     docker compose -f docker-compose.yml -f docker-compose.bench.yml up -d
+#
+# scripts/benchmark.py drives this automatically.
+
+services:
+  keygen:
+    container_name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME required}-keygen
+    image: ssh-compression-poc-bench/keygen:latest
+  redis:
+    container_name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME required}-redis
+  server:
+    container_name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME required}-server
+    image: ssh-compression-poc-bench/server:latest
+  attacker:
+    container_name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME required}-attacker
+    image: ssh-compression-poc-bench/attacker:latest
+    ports: !override []
+  client:
+    container_name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME required}-client
+    image: ssh-compression-poc-bench/client:latest
+    ports: !override []

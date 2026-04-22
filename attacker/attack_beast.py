@@ -129,6 +129,7 @@ def make_beast_sweep(bridge: BrowserBridge):
         per_nl: dict[int, dict[bytes, int]] = {
             nl: {c: 0 for c in alphabet} for nl in noise_lengths
         }
+        guesses = 0
 
         # Collect all measurements for this round first, then check
         # for outliers.  If any measurement deviates by more than 4
@@ -141,6 +142,7 @@ def make_beast_sweep(bridge: BrowserBridge):
             for noise_len in noise_lengths:
                 noise = _make_noise(noise_len)
                 for cb in alphabet:
+                    guesses += 1
                     # 1. Flush
                     await bridge.inject(flush_data)
                     if settle > 0:
@@ -188,7 +190,7 @@ def make_beast_sweep(bridge: BrowserBridge):
                 sums[cb] += val
                 per_nl[noise_len][cb] = val
 
-        return sums, per_nl
+        return sums, per_nl, guesses
 
     return sweep_fn
 

