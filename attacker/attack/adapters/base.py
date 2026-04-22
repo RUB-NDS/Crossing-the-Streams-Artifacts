@@ -8,11 +8,12 @@ secret / send guess / read packet log) lives inside the adapter.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
-
-import aiohttp
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from attacker.attack.config import AttackConfig
+
+if TYPE_CHECKING:
+    import aiohttp
 
 
 @runtime_checkable
