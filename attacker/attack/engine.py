@@ -61,6 +61,23 @@ def _select_initial_alignment(
     return list(config.alignment_lengths)
 
 
+def _trimmed_prefix(
+    known_prefix: bytes, recovered: bytes, config: AttackConfig,
+) -> bytes:
+    """Return the prefix that should be injected at the current position.
+
+    When constant_prefix_trim is on, keep len(prefix) constant across
+    positions by trimming the head of (known_prefix + recovered) so that
+    its total length equals len(known_prefix). Keeps LZ77 match lengths
+    in the same DEFLATE length-code bin at every position.
+    """
+    full = known_prefix + recovered
+    if config.constant_prefix_trim:
+        trim = max(0, len(full) - len(known_prefix))
+        full = full[trim:]
+    return full
+
+
 # ---------------------------------------------------------------------------
 # Per-position recovery
 # ---------------------------------------------------------------------------
@@ -225,10 +242,9 @@ async def run_attack(
             prev_nl: int | None = None
 
             for pos in range(config.max_length):
-                full_prefix = config.known_prefix + recovered
-                if config.constant_prefix_trim:
-                    trim = max(0, len(full_prefix) - len(config.known_prefix))
-                    full_prefix = full_prefix[trim:]
+                full_prefix = _trimmed_prefix(
+                    config.known_prefix, recovered, config,
+                )
 
                 initial_alignment = _select_initial_alignment(config, prev_nl)
                 best, pos_info = await crack_byte_position(
