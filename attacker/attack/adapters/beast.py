@@ -34,8 +34,13 @@ class BeastAdapter:
     async def setup(self, config: AttackConfig, http_session: "aiohttp.ClientSession") -> None:
         self._config = config
         self._session = http_session
-        # Cache one flush block for the life of the attack; engine-side
-        # outlier retry will regenerate it when a round is discarded.
+        # Cache one flush block for the life of the attack. Legacy
+        # attack_beast.py regenerated the flush on every outlier retry;
+        # the engine's retry (engine.py) re-invokes measure_once without
+        # refreshing adapter state, so we reuse the same block. Chrome's
+        # outlier trigger is TCP connection reuse (not flush content),
+        # so this simplification is expected to be harmless — Task 12
+        # correctness gate is the authoritative check.
         self._flush_data = _make_flush(config)
 
     async def teardown(self) -> None:
