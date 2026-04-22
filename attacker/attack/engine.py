@@ -108,23 +108,35 @@ def _select_fork_branches(
     top_k: int,
     terminator: bytes,
 ) -> list[bytes]:
-    """Pick fork-branch candidates from a stalled position's sums.
+    """Pick fork-branch candidates from a stalled position's alive set.
 
-    Returns the top-K candidates by ascending sums (lowest = most likely
-    correct), with the terminator byte filtered out. Returns an empty list
-    if fewer than 2 candidates remain after filtering — the caller should
-    treat this as "fork not applicable, use best-margin fallback."
+    Returns up to K non-terminator candidates from the alive set (candidates
+    not eliminated by candidate_elimination), ordered by ascending sums.
+    Returns an empty list if fewer than 2 candidates remain after filtering
+    — the caller should treat this as "fork not applicable, use best-margin
+    fallback."
+
+    If pos_info has no 'active_candidates' key (e.g., legacy test fixtures),
+    fall back to all keys in sums — this preserves backward compat for
+    tests that don't model elimination.
     """
     sums: dict[str, int] = pos_info["sums"]
-    # Sort by ascending value
-    ranked = sorted(sums.items(), key=lambda kv: kv[1])
+    active_list = pos_info.get("active_candidates")
+    if active_list is None:
+        active_set = set(sums.keys())
+    else:
+        active_set = set(active_list)
     terminator_str = terminator.decode("latin-1")
 
-    # Collect candidates, filtering out the terminator, until we have top_k
-    branches = []
+    ranked = sorted(sums.items(), key=lambda kv: kv[1])
+
+    branches: list[bytes] = []
     for key, _sum in ranked:
-        if key != terminator_str:
-            branches.append(key.encode("latin-1"))
+        if key == terminator_str:
+            continue
+        if key not in active_set:
+            continue
+        branches.append(key.encode("latin-1"))
         if len(branches) >= top_k:
             break
 
@@ -543,6 +555,7 @@ async def crack_byte_position(
         ],
         "clean_commit": clean_commit,
         "sums": {c.decode("latin-1"): sums[c] for c in ranked_all},
+        "active_candidates": [c.decode("latin-1") for c in active_candidates],
     }
 
 

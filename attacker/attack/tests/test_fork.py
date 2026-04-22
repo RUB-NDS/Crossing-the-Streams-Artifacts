@@ -16,6 +16,10 @@ def _stalled_info(**overrides) -> dict:
         "sums": {"e": 100, "c": 112, "k": 120, "s": 125, "r": 128, "a": 200},
     }
     base.update(overrides)
+    # Default active_candidates to all keys of sums (post-override), so
+    # existing tests behave as before unless they explicitly override
+    # active_candidates to test elimination behavior.
+    base.setdefault("active_candidates", list(base["sums"].keys()))
     return base
 
 
@@ -101,6 +105,7 @@ def _branch_result(clean: bool, best: str = "x") -> tuple:
         "ranked_top5": [(best, 50)],
         "clean_commit": clean,
         "sums": {best: 50},
+        "active_candidates": [best],
     }
     return best.encode("latin-1"), info
 
@@ -409,6 +414,18 @@ def test_resolve_insufficient_branches_skipped():
     assert fake.calls == []
 
 
+def test_select_fork_branches_filters_eliminated_candidates():
+    # y has a frozen-low sum (was eliminated early) but is not in active.
+    # Without the fix, top-3-by-sums would return [y, e, c]. With the fix,
+    # y is filtered because it's not alive.
+    info = _stalled_info(
+        sums={"y": 250, "e": 4000, "c": 4012, "k": 4100, "s": 4200},
+        active_candidates=["e", "c", "k", "s"],
+    )
+    branches = _select_fork_branches(info, top_k=3, terminator=b"\n")
+    assert branches == [b"e", b"c", b"k"]
+
+
 if __name__ == "__main__":
     test_fork_applicable_all_preconditions_met()
     test_fork_applicable_config_off()
@@ -427,4 +444,5 @@ if __name__ == "__main__":
     test_resolve_zero_clean_recurses_with_tentative_parents()
     test_resolve_zero_clean_no_depth2_winner_falls_back()
     test_resolve_insufficient_branches_skipped()
+    test_select_fork_branches_filters_eliminated_candidates()
     print("fork tests: ok")
