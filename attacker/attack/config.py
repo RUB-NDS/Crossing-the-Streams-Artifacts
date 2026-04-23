@@ -48,6 +48,8 @@ class AttackConfig:
     fork_top_k: int = 5
     max_fork_depth: int = 2
 
+    guess_prefill_bytes: int = 0
+
     label: str = ""
 
     def overlay(self, overrides: dict[str, Any]) -> "AttackConfig":

