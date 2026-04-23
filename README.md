@@ -19,10 +19,11 @@ attacker assumptions:
   exposed local port forward and injects data into the shared zlib
   context alongside the secret. Recovers a Redis `AUTH` password sent
   through the tunnel.
-- **BEAST** — the victim visits an attacker-controlled website whose
-  JavaScript makes `navigator.sendBeacon()` requests to `localhost`.
+- **BEAST** — the victim visits an attacker-served website whose
+  JavaScript makes cross-origin `navigator.sendBeacon()` requests to
+  `localhost`.
   The beacons land in the victim's own SSH port forward, entering the
-  shared compression context. A headless Chromium is automated with
+  shared compression context. A headless Firefox is automated with
   Playwright.
 - **Ansible** — the victim's system runs `ansible-playbook` jobs with
   `become: yes`, each of which spawns a fresh compressed SSH connection
@@ -148,7 +149,7 @@ breaks SSH crypto and never modifies SSH traffic.
 |OpenSSH   | TCP  |  TCP forwarder   | TCP  | OpenSSH     |
 |+redis-py | :2222|  +scapy sniffer  | :22  | sshd        |
 |+ansible  |      |  +aiohttp :9000  |      |             |
-|+Chromium |      +--+---------------+      +-------------+
+|+Firefox  |      +--+---------------+      +-------------+
 |+aiohttp  |         |
 |:8000 ctrl|         |
 +----------+         |
@@ -170,10 +171,10 @@ Five long-lived containers plus a one-shot keygen:
 - **`poc-client`** — Python 3.14 container that manages an OpenSSH
   subprocess (`ssh -N -C -v`) with two local port forwards (Redis
   tunnel on `0.0.0.0:6379`, Ansible `LocalForward` on
-  `0.0.0.0:15432`), runs Redis-py, launches a headless Chromium via
-  Playwright for the BEAST variant, and runs `ansible-playbook` jobs
-  on demand for the Ansible variant. Exposes an aiohttp control API
-  on port 8000.
+  `0.0.0.0:15432`), runs Redis-py, launches a headless Firefox via
+  Playwright for the BEAST variant (pointed at the attacker-served
+  exploit page), and runs `ansible-playbook` jobs on demand for the
+  Ansible variant. Exposes an aiohttp control API on port 8000.
 - **`poc-attacker`** — three jobs in one process:
   1. A passive **TCP forwarder** between `:2222` and `server:22`. It
      never terminates, decrypts, or modifies SSH.
@@ -333,20 +334,21 @@ Per oracle query:
 
 ### BEAST — browser injection
 
-The victim's browser (headless Chromium in the PoC) visits an
-attacker-controlled page served by the client itself on
-`localhost:8000/exploit`. JavaScript on that page opens a WebSocket
-back to the attacker and executes
+The victim's browser (headless Firefox in the PoC) visits an
+attacker-served page at `http://attacker:9000/exploit`. JavaScript
+on that page opens a WebSocket back to the attacker at
+`ws://attacker:9000/ws` and executes
 `navigator.sendBeacon('http://localhost:6379', <body>)` on command.
 Because `sendBeacon` fuses the TCP/HTTP `CHANNEL_OPEN` + data into
 one request, there is no pre-opened measurement channel — the
 adapter filters out small segments (≤ 100 bytes) to isolate the
 `CHANNEL_DATA` packet from the `CHANNEL_OPEN` jitter.
 
-The page is served from `localhost` specifically so that
-`sendBeacon → localhost:6379` is a local-to-local request and
-avoids Chrome's Private Network Access restrictions without any
-browser flag.
+The request is cross-origin and public→loopback, which Chromium and
+WebKit would preflight under Private Network Access (stripping the
+body and forcing guesses into the URL path or header name). Firefox
+as of early 2026 does not implement PNA, so the full `sendBeacon`
+body is sent directly.
 
 ### Ansible — fresh SSH per guess
 
@@ -571,7 +573,7 @@ Crossing-the-Streams-PoC/
 │   ├── Dockerfile
 │   ├── sshd_config                                 -- Compression yes, PubkeyAuth, TcpForwarding
 │   └── entrypoint.sh
-├── client/                                         -- python:3.14 + openssh-client + Chromium
+├── client/                                         -- python:3.14 + openssh-client + Firefox
 │   ├── Dockerfile
 │   ├── client.py                                   -- ssh subprocess + redis-py + ansible + browser
 │   ├── ansible/                                    -- inventory + playbook for the ansible variant
