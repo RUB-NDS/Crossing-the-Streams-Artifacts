@@ -96,17 +96,25 @@ model (passive on-path observer).
 3. An `aiohttp` control API on `:9000`, plus a `BrowserBridge`
    WebSocket used by the BEAST adapter.
 
-### BEAST exploit page lives in `client.py`, not `attacker/exploit.html`
+### BEAST exploit page is served by the attacker
 
-`client.py` serves its own inline `_EXPLOIT_HTML` at
-`http://localhost:8000/exploit`. The headless Chromium (launched by
-the client) navigates there — not to the attacker's copy. This is
-deliberate: the page must be served from `localhost` so that
-`sendBeacon('http://localhost:6379', …)` is a local-to-local
-request, bypassing Chrome's Private Network Access restrictions
-without any browser flag. `attacker/exploit.html` exists but is not
-actually loaded during an attack run. **If you edit BEAST JS, edit
-`_EXPLOIT_HTML` in `client.py`.**
+The exploit page is `attacker/exploit.html`, served at
+`http://attacker:9000/exploit` by the attacker's aiohttp process
+(route registered in `attacker/mitm.py`). The client container
+launches a headless **Firefox** via Playwright that navigates to
+that URL. Firefox is used because the page origin is
+`http://attacker:9000` and the `sendBeacon` target is
+`http://localhost:6379` — Chromium and WebKit would preflight this
+cross-origin public→loopback request under Private Network Access
+and drop the request body, defeating the body-in-request injection.
+Firefox as of early 2026 does not implement PNA, so the full body
+is sent directly.
+
+The browser still lives in the client container: it represents the
+victim's browser, which must be co-located with the SSH client to
+reach the loopback-bound forward on `localhost:6379`. **If you edit
+BEAST JS, edit `attacker/exploit.html`** — there is no inline copy
+in `client/client.py` anymore.
 
 ### Benchmark stack isolation
 
@@ -163,8 +171,9 @@ and `benchmark_summary.csv` (per-`(variant, scenario)` aggregates).
   used only by BEAST.
 - `attacker/mitm.py` — container `CMD`; forwarder + sniffer +
   `/run_attack` dispatch.
-- `client/client.py` — SSH subprocess manager, redis-py, Chromium
-  launcher, ansible runner, inline BEAST exploit HTML.
+- `client/client.py` — SSH subprocess manager, redis-py, Firefox
+  launcher (navigates to the attacker-served exploit page), ansible
+  runner.
 - `scripts/benchmark.py` — multi-stack scenario harness;
   `SCENARIO_PRESETS` is the single source of truth for the preset
   toggle combinations.
