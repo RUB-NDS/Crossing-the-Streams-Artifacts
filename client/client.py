@@ -629,9 +629,8 @@ class SSHState:
     async def launch_browser(self) -> None:
         """Launch headless Firefox and load the attacker's exploit page.
 
-        Firefox is used because other browsers' Private Network Access would
-        preflight the cross-origin sendBeacon to the loopback tunnel and strip
-        its body.
+        Firefox is used because Chromium/WebKit PNA would preflight the
+        cross-origin sendBeacon to the loopback tunnel and strip its body.
         """
         from playwright.async_api import async_playwright
 
