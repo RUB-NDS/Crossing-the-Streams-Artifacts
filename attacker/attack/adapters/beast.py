@@ -79,7 +79,12 @@ class BeastAdapter:
             max_rounds=64,
             settle=0.01,
             alignment_mode=AlignmentMode.FULL_SWEEP,
-            alignment_lengths=[0, 1, 2, 3, 4, 5, 6, 7],
+            # 0..15 (not 0..7) because Firefox's cross-origin sendBeacon
+            # puts the request in a dynamic-Huffman DEFLATE block, where
+            # the 0x80..0x8F alignment bytes cost 9-12 bits rather than
+            # the fixed-Huffman 8. Under 9-bit chars, 0..7 misses residue
+            # 1 mod 8 — a straight 1/8 per-position failure rate.
+            alignment_lengths=list(range(16)),
             candidate_elimination=True,
             constant_prefix_trim=True,
             adaptive_alignment=False,
