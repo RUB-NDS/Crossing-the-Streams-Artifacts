@@ -292,9 +292,12 @@ and commits the next one at the same time. If two branches both commit
 cleanly or none does, the engine recurses to 2-ply. On exhaustion, it
 falls back to the best-margin candidate.
 
-Direct and ansible variants rarely trigger this path because their
-signals are clean; BEAST exhibits a persistent-bias edge case at
-`hunter2` pos 4 that this fallback is specifically designed for.
+All three variants rarely trigger this path in normal operation; it
+exists as a correctness safety net for per-round signal edge cases.
+BEAST historically stalled at `hunter2` pos 4 under dynamic-Huffman
+guess blocks and relied on this fallback to advance; the
+`guess_prefill_bytes=16384` default (see §"Load-bearing constants")
+since restored a clean static-Huffman signal there.
 
 ### Constant-prefix trimming
 
@@ -350,6 +353,17 @@ body and forcing guesses into the URL path or header name). Firefox
 as of early 2026 does not implement PNA, so the full `sendBeacon`
 body is sent directly.
 
+Each guess Beacon body is prepended with 16 KiB of fresh random bytes
+before the `prefix + candidate + alignment`: the filler pushes the
+packet past zlib's `lit_bufsize = 16384` symbol boundary, closing
+block 1 on `HTTP headers + filler-head` and leaving the actual guess
+alone in a tiny block 2 that zlib encodes with fixed Huffman. Without
+the filler, the HTTP headers force dynamic Huffman on the guess
+block, which gives variable-bit-length literal codes and breaks the
+mod-8 alignment residue the attack depends on (and opens a signal
+inversion where a wrong candidate can land on a shorter Huffman code
+than the correct one).
+
 ### Ansible — fresh SSH per guess
 
 The victim periodically runs `ansible-playbook` with `become: yes`.
@@ -387,10 +401,9 @@ content has already passed through the SSH compressor by then.
 
 **Random content is critical.** An all-zeros flush saturates zlib's
 hash chain for `\x00\x00\x00` and produces sub-optimal compression;
-cryptographically random bytes keep every hash chain short. The
-BEAST variant additionally restricts the flush to `0x80..0xFF` to
-avoid LZ77 matches against the HTTP headers that `sendBeacon`
-prepends.
+cryptographically random bytes (`flush_pool="secrets_random"`) keep
+every hash chain short. Both direct and BEAST use the full
+`0x00..0xFF` range.
 
 The BEAST adapter regenerates the flush block on **every**
 measurement, not only between rounds. A cached flush creates a
@@ -423,8 +436,9 @@ position must reach before being committed:
   secret so its `CHANNEL_OPEN` lands on the far side of the secret
   in the LZ77 window.
 - **beast**: flush (via sendBeacon) → trigger_secret → send_guess
-  (via sendBeacon) → measure. No pre-opened channel because
-  sendBeacon fuses open + data.
+  (via sendBeacon, with 16 KiB of fresh random bytes prepended to the
+  body — see `guess_prefill_bytes` below) → measure. No pre-opened
+  channel because sendBeacon fuses open + data.
 - **ansible**: trigger_ansible → open_measure → send_guess →
   measure → close. No flush — fresh SSH per iteration.
 
@@ -435,6 +449,21 @@ semantics, which produces ~400-byte header-backreference anomalies.
 The engine's baked-in outlier retry discards and re-runs any round
 whose `max − min` measurement exceeds the threshold (32 bytes for
 BEAST; 0 = disabled elsewhere).
+
+### 6. `guess_prefill_bytes = 16384` (BEAST only)
+
+Prepended verbatim to the guess Beacon's body. Its only purpose is
+to push the packet past zlib's `lit_bufsize = 16384` symbol boundary
+so the deflate encoder emits a block break between `HTTP headers +
+filler-head` and `prefix + candidate + alignment`. The resulting
+block 2 is small enough (≈ 30 symbols plus any LZ77 match the
+correct candidate lights up) that zlib consistently picks fixed
+Huffman, which is what makes `[0..7]` alignment residue and the
+per-round match-length signal work. Shrinking this at BEAST's
+default config drives the guess block back into dynamic Huffman:
+literal codes become variable-bit-length, mod-8 residue breaks, and
+some wrong candidates can land on shorter Huffman codes than the
+correct one (signal inversion).
 
 ## Benchmark harness
 
@@ -525,30 +554,43 @@ Status:    PASS
 
 ```
 Phase 1: recovering password length...
-  length = 7          ( ≈ 15 s)
+  length = 7           ( ≈  70 s)
 Phase 2: recovering password...
-  password = 'hunter2' ( ≈ 20 min, 1 fork at pos 4)
+  password = 'hunter2' ( ≈ 16 min, ≈ 22 500 guesses,
+                         all 8 positions clean-commit, no fork)
 
-Total:     ≈ 20 min
-Status:    PASS (with fork-on-stall enabled — see below)
+Total:     ≈ 17 min
+Status:    PASS
 ```
 
-The BEAST per-round signal at pos 4 of `hunter2` exhibits a persistent,
-non-random bias (`huntc` vs `hunte` within a few wire bytes) that
-averaging across rounds cannot clear. The engine's **fork-on-stall**
-correctness fallback disambiguates by speculatively running position 5
-for the top-K stalled candidates and committing the branch that cleanly
-resolves. Position 5 is committed from the winning branch's speculative
-run, so the attack advances two positions at once. See
-`docs/superpowers/specs/2026-04-22-fork-on-stall-design.md` for the
-algorithm.
+Per-position commit under the default config (`FULL_SWEEP [0..7]`,
+`min_margin=64`, `guess_prefill_bytes=16384`):
+
+| Pos | Byte | Rounds | Winning `nl` |
+|-----|------|--------|--------------|
+| 0   | `h`  | 19     | 0            |
+| 1   | `u`  | 16     | 1            |
+| 2   | `n`  | 16     | 0            |
+| 3   | `t`  | 10     | 2            |
+| 4   | `e`  | 15     | 2            |
+| 5   | `r`  | 9      | 1            |
+| 6   | `2`  | 28     | 2            |
+| 7   | `\r` | 12     | 3            |
+
+Historically — before `guess_prefill_bytes` landed in BEAST's default
+config — pos 4 of `hunter2` stalled because the guess-block dynamic
+Huffman assigned `c` (a byte present in the HTTP headers) a shorter
+code than the correct `e`, yielding `huntc` at first-pass margin.
+Fork-on-stall disambiguated by speculatively running pos 5 and is
+still wired up as a safety net (see
+`docs/superpowers/specs/2026-04-22-fork-on-stall-design.md`).
 
 ### Throughput comparison (indicative)
 
 | Variant  | Ordering dominant cost | `hunter2` recovery | Per-byte cost |
 |----------|------------------------|--------------------|---------------|
 | direct   | TCP round-trip         | ≈ 2 min            | ≈ 15–30 s     |
-| BEAST    | Browser + HTTP         | ≈ 20 min           | ≈ 60–180 s    |
+| BEAST    | Browser + HTTP         | ≈ 15–20 min        | ≈ 75–220 s    |
 | ansible  | SSH handshake          | ≈ 4 min            | ≈ 20–60 s     |
 
 ## Repository layout
@@ -684,10 +726,6 @@ Response shape:
 - **Alphabet and prefix knowledge matter.** The PoC assumes
   `[a-z0-9]` secrets and a known framing prefix. A binary secret
   with no known structure would need a much larger alphabet.
-- **BEAST: persistent-bias edge case.** At some secret byte
-  positions the per-round signal is genuinely insufficient to
-  separate the correct candidate from a near-rival (observed at
-  `hunter2` pos 4). Tracked as future work (see [Results](#results)).
 - **Tested against OpenSSH only.** libssh, PuTTY, wolfSSH and others
   may differ in `MSG_IGNORE` injection, default zlib level, and
   channel-data fragmentation, which affect the constants but not

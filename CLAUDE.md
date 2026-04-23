@@ -19,7 +19,7 @@ docker compose build client   && docker compose up -d client
 
 # End-to-end verification (each ≈ 2–4 min)
 python scripts/verify_direct.py
-python scripts/verify_beast.py      # known limitation: commits 'huntc' at pos 4 — see README "Results"
+python scripts/verify_beast.py
 python scripts/verify_ansible.py
 
 # Scenario benchmark (multi-stack, isolated compose projects)
@@ -138,10 +138,12 @@ and `benchmark_summary.csv` (per-`(variant, scenario)` aggregates).
   are `COPY`'d at image build time, not bind-mounted. Host scripts
   won't see changes until the relevant service is rebuilt.
 - **Do not casually change the load-bearing constants.**
-  `flush_bytes=33000`, alignment pool `0x80..0x8F`, the per-variant
-  `min_margin`, the adapter-specific ordering, and `outlier_threshold`
-  are all explained in README §"Load-bearing constants" and in
-  docstrings. Changes here routinely collapse attack throughput.
+  `flush_bytes=33000` and `flush_pool="secrets_random"` (direct/BEAST),
+  `guess_prefill_bytes=16384` (BEAST only), alignment pool `0x80..0x8F`,
+  the per-variant `min_margin`, the adapter-specific ordering, and
+  `outlier_threshold` are all explained in README §"Load-bearing
+  constants" and in docstrings. Changes here routinely collapse attack
+  throughput.
 - **Terminator must be in the alphabet.** The engine auto-appends
   `terminator` to `alphabet` if missing (see commit `d1a6c85`); omit
   at your peril if you bypass the overlay path.
