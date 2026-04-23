@@ -450,12 +450,20 @@ optimization flags in `AttackConfig`. Transport-specific knobs
 remain at the variant's tuned default, so scenarios stay apples-to-
 apples across variants.
 
-| Preset        | alignment_mode | candidate_elim | prefix_trim | adaptive_align | stall_detect | hint_carryover |
-|---------------|----------------|----------------|-------------|----------------|--------------|----------------|
-| `baseline`    | full_sweep     | off            | on          | off            | off          | off            |
-| `full-sweep`  | full_sweep     | on             | on          | off            | off          | off            |
-| `fixed-nl`    | fixed_single   | on             | on          | off            | off          | off            |
-| `all-opts`    | full_sweep     | on             | on          | on             | on           | on             |
+| Preset                  | alignment_mode | candidate_elim | prefix_trim | adaptive_align | stall_detect | hint_carryover |
+|-------------------------|----------------|----------------|-------------|----------------|--------------|----------------|
+| `baseline`              | fixed_single   | off            | on          | off            | off          | off            |
+| `full-sweep`            | full_sweep     | off            | on          | off            | off          | off            |
+| `candidate-elimination` | fixed_single   | on             | on          | off            | off          | off            |
+| `adaptive-alignment`    | fixed_single   | off            | on          | on             | on           | on             |
+| `all-opts`              | full_sweep     | on             | on          | on             | on           | on             |
+
+Each non-`all-opts` preset isolates one axis of ablation against
+`baseline`: `full-sweep` flips only the alignment mode,
+`candidate-elimination` flips only candidate elimination, and
+`adaptive-alignment` flips the adaptive-alignment cluster
+(adaptive + stall-detect + hint carry-over). Presets that use
+`fixed_single` require `--fixed-nl N` to pin the alignment length.
 
 ### Usage
 
@@ -463,9 +471,13 @@ apples across variants.
 # Three variants × 100 passwords, all optimizations on, 4 stacks in parallel
 python scripts/benchmark.py --stacks 4 --trials 100 --scenario all-opts
 
-# Only the direct variant, fixed alignment length 1
+# Baseline (fixed alignment length 1, no optimizations), direct variant only
 python scripts/benchmark.py --stacks 2 --trials 50 \
-    --variants direct --scenario fixed-nl --fixed-nl 1
+    --variants direct --scenario baseline --fixed-nl 1
+
+# Ablation: only candidate elimination on top of baseline
+python scripts/benchmark.py --stacks 2 --trials 50 \
+    --scenario candidate-elimination --fixed-nl 1
 
 # Raw config override from a JSON file (overrides --scenario)
 python scripts/benchmark.py --trials 20 --config my-config.json

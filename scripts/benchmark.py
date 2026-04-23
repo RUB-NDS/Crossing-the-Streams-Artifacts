@@ -55,6 +55,15 @@ ANSIBLE_PHASE2_TERMINATOR = "\n"
 
 SCENARIO_PRESETS: dict[str, dict] = {
     "baseline": {
+        "alignment_mode": "fixed_single",
+        "candidate_elimination": False,
+        "constant_prefix_trim": True,
+        "adaptive_alignment": False,
+        "stall_detection": False,
+        "alignment_hint_carryover": False,
+        # alignment_lengths filled in from --fixed-nl N
+    },
+    "full-sweep": {
         "alignment_mode": "full_sweep",
         "candidate_elimination": False,
         "constant_prefix_trim": True,
@@ -62,21 +71,22 @@ SCENARIO_PRESETS: dict[str, dict] = {
         "stall_detection": False,
         "alignment_hint_carryover": False,
     },
-    "full-sweep": {
-        "alignment_mode": "full_sweep",
-        "candidate_elimination": True,
-        "constant_prefix_trim": True,
-        "adaptive_alignment": False,
-        "stall_detection": False,
-        "alignment_hint_carryover": False,
-    },
-    "fixed-nl": {
+    "candidate-elimination": {
         "alignment_mode": "fixed_single",
         "candidate_elimination": True,
         "constant_prefix_trim": True,
         "adaptive_alignment": False,
         "stall_detection": False,
         "alignment_hint_carryover": False,
+        # alignment_lengths filled in from --fixed-nl N
+    },
+    "adaptive-alignment": {
+        "alignment_mode": "fixed_single",
+        "candidate_elimination": False,
+        "constant_prefix_trim": True,
+        "adaptive_alignment": True,
+        "stall_detection": True,
+        "alignment_hint_carryover": True,
         # alignment_lengths filled in from --fixed-nl N
     },
     "all-opts": {
@@ -95,9 +105,12 @@ def _build_config_override(scenario: str, fixed_nl: int | None,
     if scenario not in SCENARIO_PRESETS:
         raise ValueError(f"unknown scenario {scenario!r}")
     cfg = dict(SCENARIO_PRESETS[scenario])
-    if scenario == "fixed-nl":
+    if cfg.get("alignment_mode") == "fixed_single":
         if fixed_nl is None:
-            raise ValueError("--fixed-nl N is required with --scenario fixed-nl")
+            raise ValueError(
+                f"--fixed-nl N is required with --scenario {scenario} "
+                "(fixed_single alignment mode needs a pinned length)"
+            )
         cfg["alignment_lengths"] = [int(fixed_nl)]
     cfg["label"] = f"{scenario}{label_suffix}"
     return cfg
@@ -523,7 +536,9 @@ def main() -> int:
                     choices=list(SCENARIO_PRESETS.keys()),
                     help="named optimization preset")
     ap.add_argument("--fixed-nl", type=int, default=None,
-                    help="required with --scenario fixed-nl: single alignment length")
+                    help="required for fixed_single scenarios "
+                         "(baseline, candidate-elimination, adaptive-alignment): "
+                         "single pinned alignment length")
     ap.add_argument("--config", default=None,
                     help="path to raw JSON config override; if set, overrides --scenario")
     ap.add_argument("--csv-summary", default="benchmark_summary.csv",
@@ -542,9 +557,12 @@ def main() -> int:
         if "label" not in config_override:
             config_override["label"] = os.path.basename(args.config)
     else:
+        uses_fixed_single = (
+            SCENARIO_PRESETS[args.scenario].get("alignment_mode") == "fixed_single"
+        )
         config_override = _build_config_override(
             args.scenario, args.fixed_nl,
-            label_suffix=(f"-nl{args.fixed_nl}" if args.scenario == "fixed-nl" else ""),
+            label_suffix=(f"-nl{args.fixed_nl}" if uses_fixed_single else ""),
         )
 
     rng = random.Random(args.seed)

@@ -24,7 +24,7 @@ python scripts/verify_ansible.py
 
 # Scenario benchmark (multi-stack, isolated compose projects)
 python scripts/benchmark.py --stacks 4 --trials 100 --scenario all-opts
-python scripts/benchmark.py --stacks 2 --trials 50 --variants direct --scenario fixed-nl --fixed-nl 1
+python scripts/benchmark.py --stacks 2 --trials 50 --variants direct --scenario baseline --fixed-nl 1
 
 # Watch per-byte progress while an attack runs
 docker compose logs -f attacker
