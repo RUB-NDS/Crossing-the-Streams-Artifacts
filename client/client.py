@@ -9,7 +9,7 @@ Two attack-target SSH connections live side by side in this container:
    of the container.  The victim's application authenticates to Redis
    with ``AUTH default <password>`` through that tunnel.  The attacker
    injects by connecting to ``client:6379`` (direct variant) or by
-   driving a headless Chromium via WebSocket (BEAST variant).
+   driving a headless Firefox via WebSocket (BEAST variant).
 
 2. **Ansible variant.**  The "victim" periodically runs an
    ansible-playbook with ``become: yes``.  Each playbook invocation
@@ -629,8 +629,9 @@ class SSHState:
     async def launch_browser(self) -> None:
         """Launch headless Firefox and load the attacker's exploit page.
 
-        Firefox is used because Chromium/WebKit PNA would preflight the
-        cross-origin sendBeacon to the loopback tunnel and strip its body.
+        Firefox is used because other browsers' Private Network Access would
+        preflight the cross-origin sendBeacon to the loopback tunnel and strip
+        its body.
         """
         from playwright.async_api import async_playwright
 
