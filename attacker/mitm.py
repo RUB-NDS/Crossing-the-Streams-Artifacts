@@ -278,6 +278,10 @@ _ADAPTER_BY_VARIANT: dict[str, Any] = {
     "ansible": AnsibleAdapter,
 }
 
+# Guards against concurrent /run_attack calls — two attacks interleaving on
+# the shared SSH compressor would destroy each other's measurements.
+_ATTACK_LOCK = asyncio.Lock()
+
 
 def _build_adapter(adapter_cls: Any, variant: str) -> Any:
     if variant == "direct":
@@ -309,18 +313,23 @@ async def handle_run_attack(request: web.Request) -> web.Response:
         return web.json_response(
             {"ok": False, "error": "browser not connected"}, status=503,
         )
+    if _ATTACK_LOCK.locked():
+        return web.json_response(
+            {"ok": False, "error": "another attack is in progress"}, status=409,
+        )
 
     config = adapter_cls.default_config().overlay(overrides)
     adapter = _build_adapter(adapter_cls, variant)
 
     LOG.info("HTTP /run_attack: variant=%s label=%r", variant, config.label)
-    try:
-        result = await run_unified_attack(adapter=adapter, config=config)
-    except Exception as exc:  # noqa: BLE001
-        LOG.exception("unified attack failed")
-        return web.json_response(
-            {"ok": False, "error": str(exc), "variant": variant}, status=500,
-        )
+    async with _ATTACK_LOCK:
+        try:
+            result = await run_unified_attack(adapter=adapter, config=config)
+        except Exception as exc:  # noqa: BLE001
+            LOG.exception("unified attack failed")
+            return web.json_response(
+                {"ok": False, "error": str(exc), "variant": variant}, status=500,
+            )
     LOG.info("unified attack done: recovered=%r", result["recovered"])
     return web.json_response({"ok": True, "variant": variant, **result})
 
