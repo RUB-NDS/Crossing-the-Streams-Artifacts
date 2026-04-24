@@ -541,6 +541,9 @@ def main() -> int:
                          "single pinned alignment length")
     ap.add_argument("--config", default=None,
                     help="path to raw JSON config override; if set, overrides --scenario")
+    ap.add_argument("--min-margin", type=int, default=None,
+                    help="override min_margin on top of the selected scenario/config "
+                         "(e.g. --min-margin 32); appended to config label as -mmN")
     ap.add_argument("--csv-summary", default="benchmark_summary.csv",
                     help="path for the one-row-per-variant CSV summary")
     args = ap.parse_args()
@@ -565,6 +568,10 @@ def main() -> int:
             label_suffix=(f"-nl{args.fixed_nl}" if uses_fixed_single else ""),
         )
 
+    if args.min_margin is not None:
+        config_override["min_margin"] = args.min_margin
+        config_override["label"] = f"{config_override['label']}-mm{args.min_margin}"
+
     rng = random.Random(args.seed)
     passwords = [
         "".join(rng.choices(args.alphabet, k=args.password_length))
@@ -588,6 +595,8 @@ def main() -> int:
     print(f"  seed          : {args.seed}")
     print(f"  scenario      : {args.scenario}")
     print(f"  config label  : {config_override['label']}")
+    if args.min_margin is not None:
+        print(f"  min_margin    : {args.min_margin} (override)")
     print(f"  projects      : {projects[:4]}{' ...' if len(projects) > 4 else ''}")
     print(f"  per-stack load: {[len(a) for a in assignments][:8]}"
           f"{' ...' if args.stacks > 8 else ''}")
