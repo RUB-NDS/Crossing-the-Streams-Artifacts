@@ -27,7 +27,7 @@ set -uo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-STACKS="${STACKS:-16}"
+STACKS="${STACKS:-20}"
 TRIALS="${TRIALS:-100}"
 FIXED_NL_DIRECT="${FIXED_NL_DIRECT:-2}"
 FIXED_NL_ANSIBLE="${FIXED_NL_ANSIBLE:-1}"
@@ -92,7 +92,7 @@ for scenario_key in "${SCENARIO_ORDER[@]}"; do
                 --min-margin "$mm" \
                 --output "$results_json" \
                 --csv-summary "$summary_csv" \
-                "${extra_args[@]}"; then
+                "${extra_args[@]}" >/dev/null 2>&1; then
                 echo "### $scenario_key/$variant mm=$mm: 100% success — stop"
                 succeeded=1
                 break
