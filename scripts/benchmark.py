@@ -724,7 +724,12 @@ def main() -> int:
             t.join()
         wall = time.time() - started
 
+        early_exit_triggered = stop_event.is_set()
+
         print(f"\n=== All trials done in {wall:.1f}s ===")
+        if early_exit_triggered:
+            print("=== Early-exit was triggered: at least one trial failed "
+                  "and the run was aborted ===")
         if failures:
             print("!! some stacks failed:")
             for f in failures:
@@ -732,6 +737,9 @@ def main() -> int:
 
         summary = summarise(results, variants)
         print_summary(summary)
+
+        all_passed = all(s["trials_failed"] == 0 for s in summary.values())
+        success = all_passed and not failures and not early_exit_triggered
 
         with open(args.output, "w") as f:
             json.dump({
@@ -744,11 +752,14 @@ def main() -> int:
                     "seed": args.seed,
                     "scenario": args.scenario,
                     "config_label": config_override["label"],
+                    "early_exit": args.early_exit,
                 },
                 "passwords": passwords,
                 "results": results,
                 "summary": summary,
                 "wall_seconds": wall,
+                "early_exit_triggered": early_exit_triggered,
+                "success": success,
             }, f, indent=2)
         print(f"\nDetailed results -> {args.output}")
 
@@ -760,6 +771,7 @@ def main() -> int:
                 "per_position_count",
                 "per_position_min", "per_position_max", "per_position_avg",
                 "fork_triggered_positions", "fork_overhead_guesses",
+                "early_exit_triggered",
             ])
             for v, s in summary.items():
                 pa = s["per_attack"]
@@ -773,11 +785,11 @@ def main() -> int:
                     pp["min"], pp["max"],
                     f"{pp['avg']:.1f}" if pp["avg"] is not None else "",
                     s["fork_triggered_positions"], s["fork_overhead_guesses"],
+                    "true" if early_exit_triggered else "false",
                 ])
         print(f"CSV summary -> {args.csv_summary}")
 
-        all_passed = all(s["trials_failed"] == 0 for s in summary.values())
-        return 0 if all_passed and not failures else 1
+        return 0 if success else 1
     finally:
         if not args.keep_up and not args.no_up:
             print("\n=== Tearing down stacks ===")
