@@ -10,6 +10,7 @@ container).
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import time
@@ -589,6 +590,7 @@ async def crack_byte_position(
 async def run_attack(
     adapter: Adapter,
     config: AttackConfig,
+    cancel_event: asyncio.Event | None = None,
 ) -> dict[str, Any]:
     import aiohttp  # local import — not needed for host-side helper tests
 
@@ -625,6 +627,12 @@ async def run_attack(
             position = 0
             done = False
             while position < config.max_length and not done:
+                if cancel_event is not None and cancel_event.is_set():
+                    LOG.info("run_attack cancelled by event at position %d", position)
+                    aborted = True
+                    abort_reason = "cancelled"
+                    break
+
                 full_prefix = _trimmed_prefix(
                     config.known_prefix, recovered, config,
                 )
