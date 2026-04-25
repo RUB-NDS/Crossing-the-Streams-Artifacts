@@ -223,6 +223,7 @@ def _http_run_attack(
     alphabet: str,
     max_length: int,
     terminator: str | None = None,
+    expected: str | None = None,
 ) -> dict:
     body_cfg = dict(config_override)
     body_cfg["known_prefix"] = known_prefix
@@ -230,10 +231,13 @@ def _http_run_attack(
     body_cfg["max_length"] = max_length
     if terminator is not None:
         body_cfg["terminator"] = terminator
+    body: dict[str, Any] = {"variant": variant, "config": body_cfg}
+    if expected is not None:
+        body["expected"] = expected
     return http(
         f"{attacker_base}/run_attack",
         method="POST",
-        body={"variant": variant, "config": body_cfg},
+        body=body,
     )
 
 
@@ -252,6 +256,8 @@ def _run_two_phase(
     phase2_max_fn: Callable,
     phase2_terminator: str | None,
     strip_trailing: str,
+    expected_phase1: str | None = None,
+    expected_phase2: str | None = None,
 ) -> dict:
     # Reset secret via client's set-secret endpoint.
     http(set_secret_url, method="POST", body={"value": password})
@@ -262,6 +268,7 @@ def _run_two_phase(
     r1 = _http_run_attack(
         attacker_base, variant, base_config,
         phase1_prefix, phase1_alphabet, phase1_max, phase1_terminator,
+        expected=expected_phase1,
     )
     phase1_recovered = r1["recovered"]
 
@@ -271,6 +278,7 @@ def _run_two_phase(
         phase2_alphabet,
         phase2_max_fn(phase1_recovered),
         phase2_terminator,
+        expected=expected_phase2,
     )
     recovered = r2["recovered"].rstrip(strip_trailing)
 
@@ -282,6 +290,9 @@ def _run_two_phase(
         "elapsed": r1.get("elapsed_seconds", 0) + r2.get("elapsed_seconds", 0),
         "phase1_per_position": r1.get("per_position", []),
         "phase2_per_position": r2.get("per_position", []),
+        "phase1_aborted": bool(r1.get("aborted")),
+        "phase2_aborted": bool(r2.get("aborted")),
+        "abort_reason": r1.get("abort_reason") or r2.get("abort_reason"),
     }
 
 
@@ -292,7 +303,20 @@ def run_variant(
     client_base: str,
     password: str,
     pw_alphabet: str,
+    early_exit: bool = False,
 ) -> dict:
+    if early_exit:
+        if variant == "direct" or variant == "beast":
+            ep1 = str(len(password)) + "\r"
+            ep2 = password + "\r"
+        elif variant == "ansible":
+            ep1 = chr(len(password)) + "\x00"
+            ep2 = password + "\n"
+        else:
+            ep1 = ep2 = None
+    else:
+        ep1 = ep2 = None
+
     if variant == "direct":
         return _run_two_phase(
             attacker_base, "direct", base_config,
@@ -307,6 +331,8 @@ def run_variant(
             phase2_max_fn=lambda s: len(password) + 1,
             phase2_terminator=None,
             strip_trailing="\r",
+            expected_phase1=ep1,
+            expected_phase2=ep2,
         )
     if variant == "beast":
         return _run_two_phase(
@@ -322,6 +348,8 @@ def run_variant(
             phase2_max_fn=lambda s: len(password) + 1,
             phase2_terminator=None,
             strip_trailing="\r",
+            expected_phase1=ep1,
+            expected_phase2=ep2,
         )
     if variant == "ansible":
         return _run_two_phase(
@@ -337,6 +365,8 @@ def run_variant(
             phase2_max_fn=lambda length_str: len(password) + 1,
             phase2_terminator=ANSIBLE_PHASE2_TERMINATOR,
             strip_trailing="\n",
+            expected_phase1=ep1,
+            expected_phase2=ep2,
         )
     raise ValueError(f"unknown variant {variant!r}")
 
@@ -381,7 +411,8 @@ def worker(
             try:
                 result = run_variant(variant, config_override,
                                      attacker_base, client_base,
-                                     password, pw_alphabet)
+                                     password, pw_alphabet,
+                                     early_exit=early_exit)
                 ok = result["recovered"] == password
                 status = "PASS" if ok else f"FAIL(expected={password!r}, got={result['recovered']!r})"
             except Exception as exc:  # noqa: BLE001
