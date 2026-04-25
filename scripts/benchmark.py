@@ -442,6 +442,9 @@ def worker(
                     "elapsed": 0.0,
                     "phase1_per_position": [],
                     "phase2_per_position": [],
+                    "phase1_aborted": False,
+                    "phase2_aborted": False,
+                    "abort_reason": None,
                 }
                 ok = False
                 status = f"ERROR: {exc}"
@@ -460,6 +463,9 @@ def worker(
                 "phase2_guesses": result.get("phase2_guesses"),
                 "phase1_per_position": result.get("phase1_per_position", []),
                 "phase2_per_position": result.get("phase2_per_position", []),
+                "phase1_aborted": result.get("phase1_aborted"),
+                "phase2_aborted": result.get("phase2_aborted"),
+                "abort_reason": result.get("abort_reason"),
                 "wall_seconds": wall,
                 "status": status,
             }
