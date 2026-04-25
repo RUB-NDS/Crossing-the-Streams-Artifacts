@@ -353,6 +353,7 @@ def worker(
     variants: list[str],
     pw_alphabet: str,
     config_override: dict,
+    early_exit: bool,
     results: list[dict],
     results_lock: threading.Lock,
     failures: list[str],
@@ -545,6 +546,11 @@ def main() -> int:
                          "(e.g. --min-margin 32); appended to config label as -mmN")
     ap.add_argument("--csv-summary", default="benchmark_summary.csv",
                     help="path for the one-row-per-variant CSV summary")
+    ap.add_argument("--early-exit", action="store_true",
+                    help="abort the run on the first wrong commit; populates "
+                         "the engine's `expected` parameter from the known "
+                         "password and broadcasts /cancel to all stacks on "
+                         "failure")
     args = ap.parse_args()
 
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
@@ -644,7 +650,7 @@ def main() -> int:
             t = threading.Thread(
                 target=worker,
                 args=(i, p, assignments[i], passwords, variants,
-                      args.alphabet, config_override,
+                      args.alphabet, config_override, args.early_exit,
                       results, results_lock, failures),
                 daemon=True,
             )
