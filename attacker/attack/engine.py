@@ -49,6 +49,30 @@ def _pick_alignment_with_largest_gap(
     return sig_nl
 
 
+def _check_expected_match(
+    committed_byte: bytes,
+    position: int,
+    expected: bytes | None,
+) -> dict | None:
+    """Compare a committed byte against the ground-truth `expected` stream.
+
+    Returns None when there's nothing to check (no expected provided, or
+    we've committed past the end of expected — the engine's normal
+    terminator path handles end-of-attack on its own). Returns a dict
+    describing the mismatch otherwise; callers should attach the dict
+    fields to the per-position record and trigger an early abort.
+    """
+    if expected is None or position >= len(expected):
+        return None
+    expected_byte = expected[position : position + 1]
+    if committed_byte == expected_byte:
+        return None
+    return {
+        "expected_byte": expected_byte.decode("latin-1"),
+        "committed_byte": committed_byte.decode("latin-1"),
+    }
+
+
 def _select_initial_alignment(
     config: AttackConfig,
     prev_nl: int | None,
