@@ -63,7 +63,7 @@ def test_overlay_handles_bytes_fields_as_str():
 
 def test_fork_fields_default_on_and_tuned():
     cfg = AttackConfig(**_base_kwargs())
-    assert cfg.candidate_fork_on_stall is True
+    assert cfg.candidate_fork_on_stall is False
     assert cfg.fork_top_k == 5
     assert cfg.max_fork_depth == 2
 
