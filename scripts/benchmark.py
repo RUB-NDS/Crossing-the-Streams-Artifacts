@@ -305,7 +305,7 @@ def run_variant(
             phase1_terminator=None,
             phase2_prefix_from_phase1=lambda s: RESP_PREFIX + s + "\r\n",
             phase2_alphabet=pw_alphabet,
-            phase2_max_fn=lambda s: int(s) + 4,
+            phase2_max_fn=lambda s: len(password) + 1,
             phase2_terminator=None,
             strip_trailing="\r",
         )
@@ -320,7 +320,7 @@ def run_variant(
             phase1_terminator=None,
             phase2_prefix_from_phase1=lambda s: RESP_PREFIX + s + "\r\n",
             phase2_alphabet=pw_alphabet,
-            phase2_max_fn=lambda s: int(s) + 4,
+            phase2_max_fn=lambda s: len(password) + 1,
             phase2_terminator=None,
             strip_trailing="\r",
         )
@@ -335,7 +335,7 @@ def run_variant(
             phase1_terminator=ANSIBLE_PHASE1_TERMINATOR,
             phase2_prefix_from_phase1=lambda length_str: ANSIBLE_PHASE1_PREFIX + length_str,
             phase2_alphabet=pw_alphabet,
-            phase2_max_fn=lambda length_str: len(password) + 4,
+            phase2_max_fn=lambda length_str: len(password) + 1,
             phase2_terminator=ANSIBLE_PHASE2_TERMINATOR,
             strip_trailing="\n",
         )
