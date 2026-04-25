@@ -282,8 +282,14 @@ _ADAPTER_BY_VARIANT: dict[str, Any] = {
 # the shared SSH compressor would destroy each other's measurements.
 _ATTACK_LOCK = asyncio.Lock()
 
-# Cleared at the start of each /run_attack; set by /cancel to short-circuit
-# an in-flight attack between positions.
+# One-shot cancel signal. /cancel always sets it (whether or not an attack
+# is currently running). The next /run_attack to enter handle_run_attack
+# observes it and short-circuits with abort_reason="cancelled" — either via
+# the engine's between-position check (if an attack starts and runs at
+# least one iteration) or via the pre-lock check below (if /cancel arrived
+# in the gap between trials, before /run_attack could acquire the lock).
+# The engine clears the event when it consumes it, making this a one-shot:
+# subsequent attacks proceed normally unless a fresh /cancel arrives.
 _CANCEL_EVENT = asyncio.Event()
 
 
@@ -329,10 +335,24 @@ async def handle_run_attack(request: web.Request) -> web.Response:
     adapter = _build_adapter(adapter_cls, variant)
 
     LOG.info("HTTP /run_attack: variant=%s label=%r", variant, config.label)
-    # Clear before acquiring the lock — safe because asyncio is single-threaded
-    # and there is no `await` between this line and the lock acquisition, so no
-    # /cancel handler can interleave and re-set the event in the gap.
-    _CANCEL_EVENT.clear()
+    # If /cancel arrived in the gap between trials (event set, no attack
+    # running), consume it here and return aborted=cancelled without
+    # acquiring the lock or running the engine. Safe in asyncio's
+    # single-threaded execution model: no `await` between is_set() and
+    # clear(), so no other coroutine can interleave.
+    if _CANCEL_EVENT.is_set():
+        _CANCEL_EVENT.clear()
+        LOG.info("/run_attack pre-cancelled by pending /cancel signal")
+        return web.json_response({
+            "ok": True, "variant": variant,
+            "recovered": "",
+            "elapsed_seconds": 0.0,
+            "total_guesses": 0,
+            "per_position": [],
+            "config_label": config.label,
+            "aborted": True,
+            "abort_reason": "cancelled",
+        })
     async with _ATTACK_LOCK:
         try:
             result = await run_unified_attack(
@@ -348,11 +368,17 @@ async def handle_run_attack(request: web.Request) -> web.Response:
 
 
 async def handle_cancel(request: web.Request) -> web.Response:
-    """Set the cancel event — in-flight /run_attack will return shortly."""
-    if _ATTACK_LOCK.locked():
-        _CANCEL_EVENT.set()
-        return web.json_response({"ok": True, "cancelled": True})
-    return web.json_response({"ok": True, "cancelled": False})
+    """Set the cancel event unconditionally.
+
+    If an attack is in flight, the engine observes the event between
+    positions and aborts with reason="cancelled". If no attack is
+    running, the event remains set; the next /run_attack on this
+    container consumes it and returns aborted=cancelled immediately
+    (closes the race where the broadcast lands between trials).
+    """
+    was_running = _ATTACK_LOCK.locked()
+    _CANCEL_EVENT.set()
+    return web.json_response({"ok": True, "cancelled": True, "was_running": was_running})
 
 
 # --------------------------------------------------------------------------

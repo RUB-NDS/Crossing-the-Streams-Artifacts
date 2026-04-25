@@ -628,6 +628,10 @@ async def run_attack(
             done = False
             while position < config.max_length and not done:
                 if cancel_event is not None and cancel_event.is_set():
+                    # Consume the event — the cancel signal is one-shot, so
+                    # the *next* /run_attack on this container starts clean
+                    # unless a fresh /cancel arrives.
+                    cancel_event.clear()
                     LOG.info("run_attack cancelled by event at position %d", position)
                     aborted = True
                     abort_reason = "cancelled"
