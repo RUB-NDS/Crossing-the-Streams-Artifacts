@@ -44,7 +44,7 @@ class AttackConfig:
     flush_pool: Literal["secrets_random", "high_ascii", "none"]
     measurement_min_segment_size: int
 
-    candidate_fork_on_stall: bool = True
+    candidate_fork_on_stall: bool = False
     fork_top_k: int = 5
     max_fork_depth: int = 2
 

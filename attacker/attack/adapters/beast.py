@@ -84,8 +84,8 @@ class BeastAdapter:
             max_length=32,
             terminator=b"\r",
             min_margin=64,
-            max_rounds=64,
-            settle=0.01,
+            max_rounds=128,
+            settle=0.05,
             alignment_mode=AlignmentMode.FULL_SWEEP,
             # [0..7] is sufficient because guess_prefill_bytes (below)
             # forces the guess into a small post-lit_bufsize block that
@@ -104,7 +104,7 @@ class BeastAdapter:
             flush_bytes=33000,
             flush_pool="secrets_random",
             measurement_min_segment_size=100,
-            candidate_fork_on_stall=True,
+            candidate_fork_on_stall=False,
             fork_top_k=5,
             max_fork_depth=2,
             guess_prefill_bytes=16384,
