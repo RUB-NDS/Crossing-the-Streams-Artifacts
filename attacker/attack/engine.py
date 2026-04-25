@@ -619,6 +619,8 @@ async def run_attack(
             recovered = b""
             per_position: list[dict[str, Any]] = []
             prev_nl: int | None = None
+            aborted = False
+            abort_reason: str | None = None
 
             position = 0
             done = False
@@ -662,6 +664,22 @@ async def run_attack(
                     per_position.append(pr)
                     if pr["successful_alignment"] is not None:
                         prev_nl = pr["successful_alignment"]
+
+                    n = pr["position"]
+                    mismatch = _check_expected_match(best_byte, n, config.expected)
+                    if mismatch is not None:
+                        pr["mismatch"] = True
+                        pr.update(mismatch)
+                        LOG.warning(
+                            "run_attack mismatch at position %d: "
+                            "expected %r, committed %r — aborting",
+                            n, mismatch["expected_byte"], mismatch["committed_byte"],
+                        )
+                        aborted = True
+                        abort_reason = "mismatch"
+                        done = True
+                        break
+
                     if best_byte == config.terminator:
                         LOG.info("hit terminator at position %d -> done", pr["position"])
                         done = True
@@ -685,4 +703,6 @@ async def run_attack(
         "total_guesses": sum(p["guesses"] for p in per_position),
         "per_position": per_position,
         "config_label": config.label,
+        "aborted": aborted,
+        "abort_reason": abort_reason,
     }
