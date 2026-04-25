@@ -485,16 +485,18 @@ apples across variants.
 |-------------------------|----------------|----------------|-------------|----------------|--------------|----------------|
 | `baseline`              | fixed_single   | off            | on          | off            | off          | off            |
 | `full-sweep`            | full_sweep     | off            | on          | off            | off          | off            |
+| `adaptive-sweep`        | full_sweep     | off            | on          | on             | on           | on             |
 | `candidate-elimination` | fixed_single   | on             | on          | off            | off          | off            |
-| `adaptive-alignment`    | fixed_single   | off            | on          | on             | on           | on             |
 | `all-opts`              | full_sweep     | on             | on          | on             | on           | on             |
 
 Each non-`all-opts` preset isolates one axis of ablation against
 `baseline`: `full-sweep` flips only the alignment mode,
-`candidate-elimination` flips only candidate elimination, and
-`adaptive-alignment` flips the adaptive-alignment cluster
-(adaptive + stall-detect + hint carry-over). Presets that use
-`fixed_single` require `--fixed-nl N` to pin the alignment length.
+`adaptive-sweep` adds the adaptive-alignment cluster (adaptive +
+stall-detect + hint carry-over) on top of `full-sweep` — meaningful
+only with multiple alignment lengths to prune from — and
+`candidate-elimination` flips only candidate elimination. Presets
+that use `fixed_single` require `--fixed-nl N` to pin the alignment
+length.
 
 ### Usage
 

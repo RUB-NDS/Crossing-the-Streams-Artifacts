@@ -71,6 +71,14 @@ SCENARIO_PRESETS: dict[str, dict] = {
         "stall_detection": False,
         "alignment_hint_carryover": False,
     },
+    "adaptive-sweep": {
+        "alignment_mode": "full_sweep",
+        "candidate_elimination": False,
+        "constant_prefix_trim": True,
+        "adaptive_alignment": True,
+        "stall_detection": True,
+        "alignment_hint_carryover": True,
+    },
     "candidate-elimination": {
         "alignment_mode": "fixed_single",
         "candidate_elimination": True,
@@ -78,15 +86,6 @@ SCENARIO_PRESETS: dict[str, dict] = {
         "adaptive_alignment": False,
         "stall_detection": False,
         "alignment_hint_carryover": False,
-        # alignment_lengths filled in from --fixed-nl N
-    },
-    "adaptive-alignment": {
-        "alignment_mode": "fixed_single",
-        "candidate_elimination": False,
-        "constant_prefix_trim": True,
-        "adaptive_alignment": True,
-        "stall_detection": True,
-        "alignment_hint_carryover": True,
         # alignment_lengths filled in from --fixed-nl N
     },
     "all-opts": {
@@ -537,7 +536,7 @@ def main() -> int:
                     help="named optimization preset")
     ap.add_argument("--fixed-nl", type=int, default=None,
                     help="required for fixed_single scenarios "
-                         "(baseline, candidate-elimination, adaptive-alignment): "
+                         "(baseline, candidate-elimination): "
                          "single pinned alignment length")
     ap.add_argument("--config", default=None,
                     help="path to raw JSON config override; if set, overrides --scenario")

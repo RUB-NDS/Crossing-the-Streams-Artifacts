@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Sweep min_margin across {variant} x {scenario}:
 #   - variants:  direct, beast, ansible   (one per benchmark run)
-#   - scenarios: baseline, full-sweep, candidate-elimination, all-opts
+#   - scenarios: baseline, full-sweep, adaptive-sweep, candidate-elimination, all-opts
 #   - min_margin: start at 8, step +8, stop on first 100%-success run,
 #                 give up after 128.
 #
 # Outputs land at:
-#   results/{baseline,sweep,elim,full}/benchmark_{results,summary}_{variant}_mmN.{json,csv}
+#   results/{baseline,sweep,adaptive,elim,full}/benchmark_{results,summary}_{variant}_mmN.{json,csv}
 #
 # Knobs (env vars):
 #   STACKS           (default 4)    parallel docker-compose projects per run
@@ -20,7 +20,8 @@
 # Notes:
 #   - beast is skipped for baseline + candidate-elimination (these use
 #     fixed_single alignment and we have no fixed_nl target for beast).
-#   - beast still runs for full-sweep + all-opts (no --fixed-nl needed).
+#   - beast still runs for full-sweep + adaptive-sweep + all-opts (no
+#     --fixed-nl needed).
 
 set -uo pipefail
 
@@ -39,10 +40,11 @@ MM_MAX="${MM_MAX:-128}"
 declare -A PRESET=(
     [baseline]=baseline
     [sweep]=full-sweep
+    [adaptive]=adaptive-sweep
     [elim]=candidate-elimination
     [full]=all-opts
 )
-SCENARIO_ORDER=(baseline sweep elim full)
+SCENARIO_ORDER=(baseline sweep adaptive elim full)
 VARIANTS=(direct beast ansible)
 
 for scenario_key in "${SCENARIO_ORDER[@]}"; do
