@@ -119,6 +119,16 @@ def _build_config_override(scenario: str, fixed_nl: int | None,
 # HTTP helper (blocking, stdlib only)
 # ---------------------------------------------------------------------------
 
+def _broadcast_cancel(attacker_bases: list[str]) -> None:
+    """POST /cancel to every attacker, best-effort. Errors are swallowed —
+    a stack that's already wedged or torn down is fine to skip."""
+    for base in attacker_bases:
+        try:
+            http(f"{base}/cancel", method="POST", body={}, timeout=5)
+        except Exception:
+            pass
+
+
 def http(
     url: str,
     method: str = "GET",
@@ -387,6 +397,8 @@ def worker(
     results: list[dict],
     results_lock: threading.Lock,
     failures: list[str],
+    stop_event: threading.Event,
+    attacker_bases: list[str],
 ) -> None:
     tag = f"[stack {stack_idx:02d} {project}]"
     try:
@@ -394,6 +406,8 @@ def worker(
         client_ip = inspect_ip(f"{project}-client")
         attacker_base = f"http://{attacker_ip}:9000"
         client_base = f"http://{client_ip}:8000"
+        with results_lock:
+            attacker_bases.append(attacker_base)
         need_browser = "beast" in variants
         print(f"{tag} waiting for readiness at {attacker_base} / {client_base}"
               f" (browser={'yes' if need_browser else 'no'})", flush=True)
@@ -405,8 +419,12 @@ def worker(
         return
 
     for trial_idx in trial_indices:
+        if early_exit and stop_event.is_set():
+            return
         password = passwords[trial_idx]
         for variant in variants:
+            if early_exit and stop_event.is_set():
+                return
             t0 = time.time()
             try:
                 result = run_variant(variant, config_override,
@@ -450,6 +468,18 @@ def worker(
             print(f"{tag} trial={trial_idx:3d} variant={variant:7s} "
                   f"guesses={result['total_guesses']:>7} wall={wall:6.1f}s  {status}",
                   flush=True)
+
+            if early_exit and not ok:
+                with results_lock:
+                    first_failure = not stop_event.is_set()
+                    if first_failure:
+                        stop_event.set()
+                    bases_snapshot = list(attacker_bases)
+                if first_failure:
+                    print(f"{tag} early-exit: broadcasting /cancel to "
+                          f"{len(bases_snapshot)} stack(s)", flush=True)
+                    _broadcast_cancel(bases_snapshot)
+                return
 
 
 # ---------------------------------------------------------------------------
@@ -675,6 +705,8 @@ def main() -> int:
         results: list[dict] = []
         results_lock = threading.Lock()
         failures: list[str] = []
+        stop_event = threading.Event()
+        attacker_bases: list[str] = []
         worker_threads = []
         started = time.time()
         for i, p in enumerate(projects):
@@ -682,7 +714,8 @@ def main() -> int:
                 target=worker,
                 args=(i, p, assignments[i], passwords, variants,
                       args.alphabet, config_override, args.early_exit,
-                      results, results_lock, failures),
+                      results, results_lock, failures,
+                      stop_event, attacker_bases),
                 daemon=True,
             )
             t.start()
