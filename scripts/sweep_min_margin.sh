@@ -16,6 +16,10 @@
 #   MM_START         (default 8)    starting min_margin
 #   MM_STEP          (default 8)    increment
 #   MM_MAX           (default 128)  upper bound (inclusive)
+#   EARLY_EXIT       (default 1)    if 1, pass --early-exit to benchmark.py
+#                                   so a doomed mm-step aborts on first
+#                                   wrong commit instead of running every
+#                                   trial to completion
 #
 # Notes:
 #   - beast is skipped for baseline + candidate-elimination (these use
@@ -35,6 +39,7 @@ FIXED_NL_ANSIBLE="${FIXED_NL_ANSIBLE:-1}"
 MM_START="${MM_START:-8}"
 MM_STEP="${MM_STEP:-8}"
 MM_MAX="${MM_MAX:-128}"
+EARLY_EXIT="${EARLY_EXIT:-1}"
 
 # scenario_key -> benchmark.py --scenario preset name
 declare -A PRESET=(
@@ -86,6 +91,10 @@ for scenario_key in "${SCENARIO_ORDER[@]}"; do
             summary_csv="$out_dir/benchmark_summary_${variant}_mm${mm}.csv"
             echo ">>> $scenario_key/$variant min_margin=$mm  -> $results_json"
 
+            ee_args=()
+            if [ "$EARLY_EXIT" = "1" ]; then
+                ee_args+=(--early-exit)
+            fi
             if python3 scripts/benchmark.py \
                 --stacks "$STACKS" \
                 --trials "$TRIALS" \
@@ -94,6 +103,7 @@ for scenario_key in "${SCENARIO_ORDER[@]}"; do
                 --min-margin "$mm" \
                 --output "$results_json" \
                 --csv-summary "$summary_csv" \
+                "${ee_args[@]}" \
                 "${extra_args[@]}" >/dev/null 2>&1; then
                 echo "### $scenario_key/$variant mm=$mm: 100% success — stop"
                 succeeded=1
