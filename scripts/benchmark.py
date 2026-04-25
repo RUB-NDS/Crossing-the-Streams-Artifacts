@@ -282,6 +282,22 @@ def _run_two_phase(
     )
     phase1_recovered = r1["recovered"]
 
+    if r1.get("aborted"):
+        # Phase 1 already failed (mismatch or cancelled); phase 2 would attack
+        # a wrong prefix and abort almost immediately. Skip it.
+        return {
+            "recovered": phase1_recovered,
+            "phase1_guesses": r1.get("total_guesses", -1),
+            "phase2_guesses": 0,
+            "total_guesses": r1.get("total_guesses", 0),
+            "elapsed": r1.get("elapsed_seconds", 0),
+            "phase1_per_position": r1.get("per_position", []),
+            "phase2_per_position": [],
+            "phase1_aborted": True,
+            "phase2_aborted": False,
+            "abort_reason": r1.get("abort_reason"),
+        }
+
     r2 = _http_run_attack(
         attacker_base, variant, base_config,
         phase2_prefix_from_phase1(phase1_recovered),
@@ -432,7 +448,12 @@ def worker(
                                      password, pw_alphabet,
                                      early_exit=early_exit)
                 ok = result["recovered"] == password
-                status = "PASS" if ok else f"FAIL(expected={password!r}, got={result['recovered']!r})"
+                if ok:
+                    status = "PASS"
+                elif result.get("abort_reason") == "cancelled":
+                    status = "CANCELLED"
+                else:
+                    status = f"FAIL(expected={password!r}, got={result['recovered']!r})"
             except Exception as exc:  # noqa: BLE001
                 result = {
                     "recovered": f"<error: {exc}>",

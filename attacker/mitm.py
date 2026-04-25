@@ -329,6 +329,9 @@ async def handle_run_attack(request: web.Request) -> web.Response:
     adapter = _build_adapter(adapter_cls, variant)
 
     LOG.info("HTTP /run_attack: variant=%s label=%r", variant, config.label)
+    # Clear before acquiring the lock — safe because asyncio is single-threaded
+    # and there is no `await` between this line and the lock acquisition, so no
+    # /cancel handler can interleave and re-set the event in the gap.
     _CANCEL_EVENT.clear()
     async with _ATTACK_LOCK:
         try:
