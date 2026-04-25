@@ -31,6 +31,7 @@ docker compose logs -f attacker
 
 # Engine-helper sanity tests (pure-logic, run on the host, no container needed)
 python -m attacker.attack.tests.test_engine_helpers
+python -m attacker.attack.tests.test_engine_expected
 python -m attacker.attack.tests.test_alignment
 python -m attacker.attack.tests.test_config
 ```
