@@ -302,7 +302,10 @@ async def handle_run_attack(request: web.Request) -> web.Response:
         except Exception:  # noqa: BLE001
             body = {}
     variant = body.get("variant", "direct")
-    overrides = body.get("config", {}) or {}
+    overrides = dict(body.get("config", {}) or {})
+    expected = body.get("expected")
+    if expected is not None:
+        overrides["expected"] = expected
 
     adapter_cls = _ADAPTER_BY_VARIANT.get(variant)
     if adapter_cls is None:
