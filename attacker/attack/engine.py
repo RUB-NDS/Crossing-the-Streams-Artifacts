@@ -10,6 +10,7 @@ container).
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import time
@@ -47,6 +48,30 @@ def _pick_alignment_with_largest_gap(
             best_gap = gap
             sig_nl = nl
     return sig_nl
+
+
+def _check_expected_match(
+    committed_byte: bytes,
+    position: int,
+    expected: bytes | None,
+) -> dict | None:
+    """Compare a committed byte against the ground-truth `expected` stream.
+
+    Returns None when there's nothing to check (no expected provided, or
+    we've committed past the end of expected — the engine's normal
+    terminator path handles end-of-attack on its own). Returns a dict
+    describing the mismatch otherwise; callers should attach the dict
+    fields to the per-position record and trigger an early abort.
+    """
+    if expected is None or position >= len(expected):
+        return None
+    expected_byte = expected[position : position + 1]
+    if committed_byte == expected_byte:
+        return None
+    return {
+        "expected_byte": expected_byte.decode("latin-1"),
+        "committed_byte": committed_byte.decode("latin-1"),
+    }
 
 
 def _select_initial_alignment(
@@ -565,6 +590,7 @@ async def crack_byte_position(
 async def run_attack(
     adapter: Adapter,
     config: AttackConfig,
+    cancel_event: asyncio.Event | None = None,
 ) -> dict[str, Any]:
     import aiohttp  # local import — not needed for host-side helper tests
 
@@ -595,10 +621,18 @@ async def run_attack(
             recovered = b""
             per_position: list[dict[str, Any]] = []
             prev_nl: int | None = None
+            aborted = False
+            abort_reason: str | None = None
 
             position = 0
             done = False
             while position < config.max_length and not done:
+                if cancel_event is not None and cancel_event.is_set():
+                    LOG.info("run_attack cancelled by event at position %d", position)
+                    aborted = True
+                    abort_reason = "cancelled"
+                    break
+
                 full_prefix = _trimmed_prefix(
                     config.known_prefix, recovered, config,
                 )
@@ -638,6 +672,22 @@ async def run_attack(
                     per_position.append(pr)
                     if pr["successful_alignment"] is not None:
                         prev_nl = pr["successful_alignment"]
+
+                    n = pr["position"]
+                    mismatch = _check_expected_match(best_byte, n, config.expected)
+                    if mismatch is not None:
+                        pr["mismatch"] = True
+                        pr.update(mismatch)
+                        LOG.warning(
+                            "run_attack mismatch at position %d: "
+                            "expected %r, committed %r — aborting",
+                            n, mismatch["expected_byte"], mismatch["committed_byte"],
+                        )
+                        aborted = True
+                        abort_reason = "mismatch"
+                        done = True
+                        break
+
                     if best_byte == config.terminator:
                         LOG.info("hit terminator at position %d -> done", pr["position"])
                         done = True
@@ -661,4 +711,6 @@ async def run_attack(
         "total_guesses": sum(p["guesses"] for p in per_position),
         "per_position": per_position,
         "config_label": config.label,
+        "aborted": aborted,
+        "abort_reason": abort_reason,
     }

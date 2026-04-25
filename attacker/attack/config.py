@@ -50,6 +50,8 @@ class AttackConfig:
 
     guess_prefill_bytes: int = 0
 
+    expected: bytes | None = None
+
     label: str = ""
 
     def overlay(self, overrides: dict[str, Any]) -> "AttackConfig":
@@ -58,7 +60,7 @@ class AttackConfig:
         for key, value in overrides.items():
             if value is None:
                 continue
-            if key in ("known_prefix", "terminator"):
+            if key in ("known_prefix", "terminator", "expected"):
                 converted[key] = value.encode("utf-8") if isinstance(value, str) else bytes(value)
             elif key == "alphabet":
                 if isinstance(value, str):

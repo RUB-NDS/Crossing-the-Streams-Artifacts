@@ -282,6 +282,10 @@ _ADAPTER_BY_VARIANT: dict[str, Any] = {
 # the shared SSH compressor would destroy each other's measurements.
 _ATTACK_LOCK = asyncio.Lock()
 
+# Cleared at the start of each /run_attack; set by /cancel to short-circuit
+# an in-flight attack between positions.
+_CANCEL_EVENT = asyncio.Event()
+
 
 def _build_adapter(adapter_cls: Any, variant: str) -> Any:
     if variant == "direct":
@@ -302,7 +306,10 @@ async def handle_run_attack(request: web.Request) -> web.Response:
         except Exception:  # noqa: BLE001
             body = {}
     variant = body.get("variant", "direct")
-    overrides = body.get("config", {}) or {}
+    overrides = dict(body.get("config", {}) or {})
+    expected = body.get("expected")
+    if expected is not None:
+        overrides["expected"] = expected
 
     adapter_cls = _ADAPTER_BY_VARIANT.get(variant)
     if adapter_cls is None:
@@ -322,9 +329,15 @@ async def handle_run_attack(request: web.Request) -> web.Response:
     adapter = _build_adapter(adapter_cls, variant)
 
     LOG.info("HTTP /run_attack: variant=%s label=%r", variant, config.label)
+    # Clear before acquiring the lock — safe because asyncio is single-threaded
+    # and there is no `await` between this line and the lock acquisition, so no
+    # /cancel handler can interleave and re-set the event in the gap.
+    _CANCEL_EVENT.clear()
     async with _ATTACK_LOCK:
         try:
-            result = await run_unified_attack(adapter=adapter, config=config)
+            result = await run_unified_attack(
+                adapter=adapter, config=config, cancel_event=_CANCEL_EVENT,
+            )
         except Exception as exc:  # noqa: BLE001
             LOG.exception("unified attack failed")
             return web.json_response(
@@ -332,6 +345,14 @@ async def handle_run_attack(request: web.Request) -> web.Response:
             )
     LOG.info("unified attack done: recovered=%r", result["recovered"])
     return web.json_response({"ok": True, "variant": variant, **result})
+
+
+async def handle_cancel(request: web.Request) -> web.Response:
+    """Set the cancel event — in-flight /run_attack will return shortly."""
+    if _ATTACK_LOCK.locked():
+        _CANCEL_EVENT.set()
+        return web.json_response({"ok": True, "cancelled": True})
+    return web.json_response({"ok": True, "cancelled": False})
 
 
 # --------------------------------------------------------------------------
@@ -367,6 +388,7 @@ async def main() -> int:
     app.router.add_post("/trigger_secret", handle_trigger_secret)
     app.router.add_post("/trigger_payload", handle_trigger_payload)
     app.router.add_post("/run_attack", handle_run_attack)
+    app.router.add_post("/cancel", handle_cancel)
     app.router.add_get("/exploit", handle_exploit)
     app.router.add_get("/ws", handle_ws)
     runner = web.AppRunner(app)

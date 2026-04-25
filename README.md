@@ -670,6 +670,7 @@ Crossing-the-Streams-PoC/
 | GET    | `/exploit`         | Serves the (secondary, unused) attacker-hosted exploit page |
 | GET    | `/ws`              | WebSocket endpoint for the victim's browser (BEAST) |
 | POST   | `/run_attack`      | **Unified attack endpoint** — dispatches on `variant` |
+| POST   | `/cancel`          | Set the cancel-event so an in-flight `/run_attack` returns at the next position boundary |
 
 `/run_attack` request body (all `config` fields optional; omitted
 fields fall back to the adapter's `default_config()`):
@@ -697,9 +698,25 @@ fields fall back to the adapter's `default_config()`):
     "flush_pool":          "secrets_random",
     "measurement_min_segment_size": 0,
     "label":               "all-opts"
-  }
+  },
+  "expected": "hunter2\r"
 }
 ```
+
+Optional top-level `expected` is the ground-truth byte stream the
+engine should be committing (the recovered secret + terminator). When
+present, the engine compares each committed byte against
+`expected[N]` and aborts with `aborted: true, abort_reason:
+"mismatch"` on the first divergence — used by `benchmark.py
+--early-exit` to fast-fail doomed runs. Omit it to let the attack
+run to completion regardless of intermediate commits.
+
+`/cancel` is idempotent. While an attack is running it sets a
+module-scoped `asyncio.Event` and returns `{"ok": true, "cancelled":
+true}`; the engine observes the event between positions and returns
+shortly with `aborted: true, abort_reason: "cancelled"`. When idle it
+returns `{"ok": true, "cancelled": false}` and does **not** pre-set
+the event, so a future `/run_attack` is unaffected.
 
 Response shape:
 
@@ -711,6 +728,8 @@ Response shape:
   "recovered": "hunter2",
   "elapsed_seconds": 101.3,
   "total_guesses": 2847,
+  "aborted": false,
+  "abort_reason": null,
   "per_position": [
     {"position": 0, "best": "h", "guesses": 432, "rounds": 4,
      "final_margin": 18, "successful_alignment": 1,
@@ -718,6 +737,13 @@ Response shape:
   ]
 }
 ```
+
+`aborted` and `abort_reason` are `false`/`null` on a normal completion.
+On an early-exit, `aborted: true` and `abort_reason` is one of
+`"mismatch"` (a committed byte didn't match `expected`) or
+`"cancelled"` (`/cancel` fired). The position dict that triggered a
+mismatch additionally carries `"mismatch": true, "expected_byte":
+"...", "committed_byte": "..."`.
 
 ## Limitations and caveats
 

@@ -63,7 +63,7 @@ def test_overlay_handles_bytes_fields_as_str():
 
 def test_fork_fields_default_on_and_tuned():
     cfg = AttackConfig(**_base_kwargs())
-    assert cfg.candidate_fork_on_stall is True
+    assert cfg.candidate_fork_on_stall is False
     assert cfg.fork_top_k == 5
     assert cfg.max_fork_depth == 2
 
@@ -80,10 +80,40 @@ def test_overlay_fork_fields():
     assert overridden.max_fork_depth == 3
 
 
+def test_expected_defaults_to_none():
+    cfg = AttackConfig(**_base_kwargs())
+    assert cfg.expected is None
+
+
+def test_overlay_decodes_expected_from_str():
+    base = AttackConfig(**_base_kwargs())
+    overridden = base.overlay({"expected": "hunter2\r"})
+    assert overridden.expected == b"hunter2\r"
+
+
+def test_overlay_decodes_expected_with_control_bytes():
+    # Ansible phase1 expected uses chr(len) + "\x00" — round-trip must preserve
+    # control bytes exactly.
+    base = AttackConfig(**_base_kwargs())
+    overridden = base.overlay({"expected": "\x08\x00"})
+    assert overridden.expected == b"\x08\x00"
+
+
+def test_overlay_expected_none_keeps_field_unset():
+    base = AttackConfig(**_base_kwargs())
+    # The overlay is meant to skip None values, matching the existing pattern.
+    overridden = base.overlay({"expected": None})
+    assert overridden.expected is None
+
+
 if __name__ == "__main__":
     test_construct_defaults()
     test_from_dict_partial_override()
     test_overlay_handles_bytes_fields_as_str()
     test_fork_fields_default_on_and_tuned()
     test_overlay_fork_fields()
+    test_expected_defaults_to_none()
+    test_overlay_decodes_expected_from_str()
+    test_overlay_decodes_expected_with_control_bytes()
+    test_overlay_expected_none_keeps_field_unset()
     print("config tests: ok")

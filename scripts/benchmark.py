@@ -119,6 +119,16 @@ def _build_config_override(scenario: str, fixed_nl: int | None,
 # HTTP helper (blocking, stdlib only)
 # ---------------------------------------------------------------------------
 
+def _broadcast_cancel(attacker_bases: list[str]) -> None:
+    """POST /cancel to every attacker, best-effort. Errors are swallowed —
+    a stack that's already wedged or torn down is fine to skip."""
+    for base in attacker_bases:
+        try:
+            http(f"{base}/cancel", method="POST", body={}, timeout=5)
+        except Exception:
+            pass
+
+
 def http(
     url: str,
     method: str = "GET",
@@ -223,6 +233,7 @@ def _http_run_attack(
     alphabet: str,
     max_length: int,
     terminator: str | None = None,
+    expected: str | None = None,
 ) -> dict:
     body_cfg = dict(config_override)
     body_cfg["known_prefix"] = known_prefix
@@ -230,10 +241,13 @@ def _http_run_attack(
     body_cfg["max_length"] = max_length
     if terminator is not None:
         body_cfg["terminator"] = terminator
+    body: dict[str, Any] = {"variant": variant, "config": body_cfg}
+    if expected is not None:
+        body["expected"] = expected
     return http(
         f"{attacker_base}/run_attack",
         method="POST",
-        body={"variant": variant, "config": body_cfg},
+        body=body,
     )
 
 
@@ -252,6 +266,8 @@ def _run_two_phase(
     phase2_max_fn: Callable,
     phase2_terminator: str | None,
     strip_trailing: str,
+    expected_phase1: str | None = None,
+    expected_phase2: str | None = None,
 ) -> dict:
     # Reset secret via client's set-secret endpoint.
     http(set_secret_url, method="POST", body={"value": password})
@@ -262,8 +278,25 @@ def _run_two_phase(
     r1 = _http_run_attack(
         attacker_base, variant, base_config,
         phase1_prefix, phase1_alphabet, phase1_max, phase1_terminator,
+        expected=expected_phase1,
     )
     phase1_recovered = r1["recovered"]
+
+    if r1.get("aborted"):
+        # Phase 1 already failed (mismatch or cancelled); phase 2 would attack
+        # a wrong prefix and abort almost immediately. Skip it.
+        return {
+            "recovered": phase1_recovered,
+            "phase1_guesses": r1.get("total_guesses", -1),
+            "phase2_guesses": 0,
+            "total_guesses": r1.get("total_guesses", 0),
+            "elapsed": r1.get("elapsed_seconds", 0),
+            "phase1_per_position": r1.get("per_position", []),
+            "phase2_per_position": [],
+            "phase1_aborted": True,
+            "phase2_aborted": False,
+            "abort_reason": r1.get("abort_reason"),
+        }
 
     r2 = _http_run_attack(
         attacker_base, variant, base_config,
@@ -271,6 +304,7 @@ def _run_two_phase(
         phase2_alphabet,
         phase2_max_fn(phase1_recovered),
         phase2_terminator,
+        expected=expected_phase2,
     )
     recovered = r2["recovered"].rstrip(strip_trailing)
 
@@ -282,6 +316,9 @@ def _run_two_phase(
         "elapsed": r1.get("elapsed_seconds", 0) + r2.get("elapsed_seconds", 0),
         "phase1_per_position": r1.get("per_position", []),
         "phase2_per_position": r2.get("per_position", []),
+        "phase1_aborted": bool(r1.get("aborted")),
+        "phase2_aborted": bool(r2.get("aborted")),
+        "abort_reason": r1.get("abort_reason") or r2.get("abort_reason"),
     }
 
 
@@ -292,7 +329,20 @@ def run_variant(
     client_base: str,
     password: str,
     pw_alphabet: str,
+    early_exit: bool = False,
 ) -> dict:
+    if early_exit:
+        if variant == "direct" or variant == "beast":
+            ep1 = str(len(password)) + "\r"
+            ep2 = password + "\r"
+        elif variant == "ansible":
+            ep1 = chr(len(password)) + "\x00"
+            ep2 = password + "\n"
+        else:
+            ep1 = ep2 = None
+    else:
+        ep1 = ep2 = None
+
     if variant == "direct":
         return _run_two_phase(
             attacker_base, "direct", base_config,
@@ -307,6 +357,8 @@ def run_variant(
             phase2_max_fn=lambda s: len(password) + 1,
             phase2_terminator=None,
             strip_trailing="\r",
+            expected_phase1=ep1,
+            expected_phase2=ep2,
         )
     if variant == "beast":
         return _run_two_phase(
@@ -322,6 +374,8 @@ def run_variant(
             phase2_max_fn=lambda s: len(password) + 1,
             phase2_terminator=None,
             strip_trailing="\r",
+            expected_phase1=ep1,
+            expected_phase2=ep2,
         )
     if variant == "ansible":
         return _run_two_phase(
@@ -337,6 +391,8 @@ def run_variant(
             phase2_max_fn=lambda length_str: len(password) + 1,
             phase2_terminator=ANSIBLE_PHASE2_TERMINATOR,
             strip_trailing="\n",
+            expected_phase1=ep1,
+            expected_phase2=ep2,
         )
     raise ValueError(f"unknown variant {variant!r}")
 
@@ -353,9 +409,12 @@ def worker(
     variants: list[str],
     pw_alphabet: str,
     config_override: dict,
+    early_exit: bool,
     results: list[dict],
     results_lock: threading.Lock,
     failures: list[str],
+    stop_event: threading.Event,
+    attacker_bases: list[str],
 ) -> None:
     tag = f"[stack {stack_idx:02d} {project}]"
     try:
@@ -363,6 +422,8 @@ def worker(
         client_ip = inspect_ip(f"{project}-client")
         attacker_base = f"http://{attacker_ip}:9000"
         client_base = f"http://{client_ip}:8000"
+        with results_lock:
+            attacker_bases.append(attacker_base)
         need_browser = "beast" in variants
         print(f"{tag} waiting for readiness at {attacker_base} / {client_base}"
               f" (browser={'yes' if need_browser else 'no'})", flush=True)
@@ -374,15 +435,25 @@ def worker(
         return
 
     for trial_idx in trial_indices:
+        if early_exit and stop_event.is_set():
+            return
         password = passwords[trial_idx]
         for variant in variants:
+            if early_exit and stop_event.is_set():
+                return
             t0 = time.time()
             try:
                 result = run_variant(variant, config_override,
                                      attacker_base, client_base,
-                                     password, pw_alphabet)
+                                     password, pw_alphabet,
+                                     early_exit=early_exit)
                 ok = result["recovered"] == password
-                status = "PASS" if ok else f"FAIL(expected={password!r}, got={result['recovered']!r})"
+                if ok:
+                    status = "PASS"
+                elif result.get("abort_reason") == "cancelled":
+                    status = "CANCELLED"
+                else:
+                    status = f"FAIL(expected={password!r}, got={result['recovered']!r})"
             except Exception as exc:  # noqa: BLE001
                 result = {
                     "recovered": f"<error: {exc}>",
@@ -392,6 +463,9 @@ def worker(
                     "elapsed": 0.0,
                     "phase1_per_position": [],
                     "phase2_per_position": [],
+                    "phase1_aborted": False,
+                    "phase2_aborted": False,
+                    "abort_reason": None,
                 }
                 ok = False
                 status = f"ERROR: {exc}"
@@ -410,6 +484,9 @@ def worker(
                 "phase2_guesses": result.get("phase2_guesses"),
                 "phase1_per_position": result.get("phase1_per_position", []),
                 "phase2_per_position": result.get("phase2_per_position", []),
+                "phase1_aborted": result.get("phase1_aborted"),
+                "phase2_aborted": result.get("phase2_aborted"),
+                "abort_reason": result.get("abort_reason"),
                 "wall_seconds": wall,
                 "status": status,
             }
@@ -418,6 +495,18 @@ def worker(
             print(f"{tag} trial={trial_idx:3d} variant={variant:7s} "
                   f"guesses={result['total_guesses']:>7} wall={wall:6.1f}s  {status}",
                   flush=True)
+
+            if early_exit and not ok:
+                with results_lock:
+                    first_failure = not stop_event.is_set()
+                    if first_failure:
+                        stop_event.set()
+                    bases_snapshot = list(attacker_bases)
+                if first_failure:
+                    print(f"{tag} early-exit: broadcasting /cancel to "
+                          f"{len(bases_snapshot)} stack(s)", flush=True)
+                    _broadcast_cancel(bases_snapshot)
+                return
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +634,11 @@ def main() -> int:
                          "(e.g. --min-margin 32); appended to config label as -mmN")
     ap.add_argument("--csv-summary", default="benchmark_summary.csv",
                     help="path for the one-row-per-variant CSV summary")
+    ap.add_argument("--early-exit", action="store_true",
+                    help="abort the run on the first wrong commit; populates "
+                         "the engine's `expected` parameter from the known "
+                         "password and broadcasts /cancel to all stacks on "
+                         "failure")
     args = ap.parse_args()
 
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
@@ -638,14 +732,17 @@ def main() -> int:
         results: list[dict] = []
         results_lock = threading.Lock()
         failures: list[str] = []
+        stop_event = threading.Event()
+        attacker_bases: list[str] = []
         worker_threads = []
         started = time.time()
         for i, p in enumerate(projects):
             t = threading.Thread(
                 target=worker,
                 args=(i, p, assignments[i], passwords, variants,
-                      args.alphabet, config_override,
-                      results, results_lock, failures),
+                      args.alphabet, config_override, args.early_exit,
+                      results, results_lock, failures,
+                      stop_event, attacker_bases),
                 daemon=True,
             )
             t.start()
@@ -654,7 +751,12 @@ def main() -> int:
             t.join()
         wall = time.time() - started
 
+        early_exit_triggered = stop_event.is_set()
+
         print(f"\n=== All trials done in {wall:.1f}s ===")
+        if early_exit_triggered:
+            print("=== Early-exit was triggered: at least one trial failed "
+                  "and the run was aborted ===")
         if failures:
             print("!! some stacks failed:")
             for f in failures:
@@ -662,6 +764,9 @@ def main() -> int:
 
         summary = summarise(results, variants)
         print_summary(summary)
+
+        all_passed = all(s["trials_failed"] == 0 for s in summary.values())
+        success = all_passed and not failures and not early_exit_triggered
 
         with open(args.output, "w") as f:
             json.dump({
@@ -674,11 +779,14 @@ def main() -> int:
                     "seed": args.seed,
                     "scenario": args.scenario,
                     "config_label": config_override["label"],
+                    "early_exit": args.early_exit,
                 },
                 "passwords": passwords,
                 "results": results,
                 "summary": summary,
                 "wall_seconds": wall,
+                "early_exit_triggered": early_exit_triggered,
+                "success": success,
             }, f, indent=2)
         print(f"\nDetailed results -> {args.output}")
 
@@ -690,6 +798,7 @@ def main() -> int:
                 "per_position_count",
                 "per_position_min", "per_position_max", "per_position_avg",
                 "fork_triggered_positions", "fork_overhead_guesses",
+                "early_exit_triggered",
             ])
             for v, s in summary.items():
                 pa = s["per_attack"]
@@ -703,11 +812,11 @@ def main() -> int:
                     pp["min"], pp["max"],
                     f"{pp['avg']:.1f}" if pp["avg"] is not None else "",
                     s["fork_triggered_positions"], s["fork_overhead_guesses"],
+                    "true" if early_exit_triggered else "false",
                 ])
         print(f"CSV summary -> {args.csv_summary}")
 
-        all_passed = all(s["trials_failed"] == 0 for s in summary.values())
-        return 0 if all_passed and not failures else 1
+        return 0 if success else 1
     finally:
         if not args.keep_up and not args.no_up:
             print("\n=== Tearing down stacks ===")
