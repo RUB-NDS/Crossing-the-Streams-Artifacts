@@ -47,6 +47,7 @@ import logging
 import os
 import signal
 import sys
+from collections import deque
 from typing import Optional
 
 import redis.asyncio as aioredis
@@ -146,6 +147,11 @@ class SSHState:
         self._lock = asyncio.Lock()
         self._negotiated: dict[str, str] = {}
         self._stderr_task: Optional[asyncio.Task] = None
+        # Ring buffer of the most recent ssh -v stderr lines. Captured by
+        # _drain_stderr; surfaced in RuntimeError messages from
+        # _wait_for_tunnels so a 255-exit reports the actual OpenSSH cause
+        # (e.g. "bind: Address already in use", "Connection refused").
+        self._stderr_tail: deque[str] = deque(maxlen=64)
         self._playwright = None
         self._browser = None
         # Ansible variant state ------------------------------------------
@@ -265,6 +271,9 @@ class SSHState:
         """Launch ssh subprocess with port forwards."""
         self._write_known_hosts()
         self._write_ssh_config()
+        # Fresh ring buffer per connect — a RuntimeError raised below
+        # should only surface stderr from this attempt, not the prior one.
+        self._stderr_tail.clear()
         cmd = self._build_ssh_cmd()
         LOG.info("launching: %s", " ".join(cmd))
         self.ssh_proc = await asyncio.create_subprocess_exec(
@@ -283,13 +292,17 @@ class SSHState:
         LOG.info("SSH tunnels ready")
 
     async def _drain_stderr(self) -> None:
-        """Read and discard ssh -v stderr to prevent pipe buffer deadlock."""
+        """Read ssh -v stderr to prevent pipe buffer deadlock; tail-buffer
+        each line into _stderr_tail so a 255-exit can be diagnosed."""
         assert self.ssh_proc is not None and self.ssh_proc.stderr is not None
         try:
             while True:
                 line = await self.ssh_proc.stderr.readline()
                 if not line:
                     break
+                self._stderr_tail.append(
+                    line.decode("utf-8", errors="replace").rstrip()
+                )
         except (asyncio.CancelledError, OSError):
             pass
 
@@ -312,6 +325,7 @@ class SSHState:
                 break
             line = line_bytes.decode("utf-8", errors="replace").strip()
             LOG.debug("ssh: %s", line)
+            self._stderr_tail.append(line)
             # debug1: kex: server->client cipher: ... compression: ...
             if "kex: client->server" in line or "kex: server->client" in line:
                 direction = "send" if "client->server" in line else "recv"
@@ -331,6 +345,7 @@ class SSHState:
             if self.ssh_proc and self.ssh_proc.returncode is not None:
                 raise RuntimeError(
                     f"ssh exited with code {self.ssh_proc.returncode}"
+                    f"{self._format_stderr_tail()}"
                 )
             try:
                 _, w = await asyncio.open_connection(
@@ -343,7 +358,21 @@ class SSHState:
                 return
             except OSError:
                 await asyncio.sleep(0.3)
-        raise TimeoutError(f"Redis tunnel not ready after {timeout}s")
+        raise TimeoutError(
+            f"Redis tunnel not ready after {timeout}s"
+            f"{self._format_stderr_tail()}"
+        )
+
+    def _format_stderr_tail(self) -> str:
+        """Return the tail-buffered ssh stderr as a suffix for a raised
+        error. Empty string if nothing was captured."""
+        if not self._stderr_tail:
+            return ""
+        return (
+            "\n--- last ssh stderr (most recent "
+            f"{len(self._stderr_tail)} lines) ---\n"
+            + "\n".join(self._stderr_tail)
+        )
 
     async def reconnect(self) -> None:
         """Kill ssh, re-launch with a fresh compression context."""
