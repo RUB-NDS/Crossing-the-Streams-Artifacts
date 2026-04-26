@@ -13,6 +13,11 @@ services:
     volumes:
       - ./keys:/keys
       - ./scripts:/scripts:ro
+    # Bypass the server image's pin-hosts ENTRYPOINT: keygen runs first
+    # in the dependency order, so siblings don't exist yet and pinning
+    # would burn ~30s per peer waiting for them. keygen also doesn't
+    # need DNS — it only writes to a shared volume.
+    entrypoint: []
     command: ["/bin/sh", "/scripts/keygen.sh"]
     networks:
       - sshpoc
@@ -54,7 +59,9 @@ services:
   # attack orchestrator.  Sits on the path between client and server.
   # ----------------------------------------------------------------------
   attacker:
-    build: ./attacker
+    build:
+      context: .
+      dockerfile: attacker/Dockerfile
     container_name: poc-attacker
     hostname: attacker
     depends_on:

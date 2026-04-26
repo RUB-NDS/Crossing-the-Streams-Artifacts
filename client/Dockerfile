@@ -19,4 +19,11 @@ COPY client/ansible /app/ansible
 
 COPY client/client.py .
 
+# Pin sibling-container hostnames in /etc/hosts at startup so ssh and
+# every other subprocess never queries Docker's embedded DNS resolver
+# (127.0.0.11) under burst load. See scripts/pin-hosts.sh for rationale.
+COPY scripts/pin-hosts.sh /usr/local/bin/pin-hosts.sh
+RUN chmod +x /usr/local/bin/pin-hosts.sh
+
+ENTRYPOINT ["/usr/local/bin/pin-hosts.sh"]
 CMD ["python", "/app/client.py"]

@@ -20,5 +20,12 @@ COPY server/sshd_config /etc/ssh/sshd_config
 COPY server/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# Pin sibling-container hostnames in /etc/hosts at startup so sshd's
+# LocalForward target ("redis") never queries Docker's embedded DNS
+# resolver (127.0.0.11) under burst load. See scripts/pin-hosts.sh.
+COPY scripts/pin-hosts.sh /usr/local/bin/pin-hosts.sh
+RUN chmod +x /usr/local/bin/pin-hosts.sh
+
 EXPOSE 22
+ENTRYPOINT ["/usr/local/bin/pin-hosts.sh"]
 CMD ["/entrypoint.sh"]

@@ -10,16 +10,23 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY attacker/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY mitm.py exploit.html ./
+COPY attacker/mitm.py attacker/exploit.html ./
 
 # New unified engine package.  The engine uses `from attacker.attack.*`
 # imports, so we replicate the on-disk layout: /app/attacker/attack/.
 # /app is already on sys.path (it is the WORKDIR / the CMD's cwd).
 RUN mkdir -p attacker
 RUN touch attacker/__init__.py
-COPY attack/ attacker/attack/
+COPY attacker/attack/ attacker/attack/
 
+# Pin sibling-container hostnames in /etc/hosts at startup so the main
+# process never queries Docker's embedded DNS resolver (127.0.0.11)
+# under burst load. See scripts/pin-hosts.sh for rationale.
+COPY scripts/pin-hosts.sh /usr/local/bin/pin-hosts.sh
+RUN chmod +x /usr/local/bin/pin-hosts.sh
+
+ENTRYPOINT ["/usr/local/bin/pin-hosts.sh"]
 CMD ["python", "/app/mitm.py"]
