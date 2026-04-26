@@ -16,11 +16,25 @@ services:
   keygen:
     container_name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME required}-keygen
     image: ssh-compression-poc-bench/keygen:latest
+    # Bench runs assume keys are pregenerated on the host. Gate keygen
+    # behind a profile that's never activated so it isn't built or
+    # started — saves one container per stack (×100 stacks adds up) and
+    # avoids the shared-./keys race when many stacks come up at once.
+    profiles: ["never"]
   redis:
     container_name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME required}-redis
   server:
     container_name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME required}-server
     image: ssh-compression-poc-bench/server:latest
+    # `required: false` lets Compose silently drop the dependency when
+    # keygen's profile is inactive, instead of failing with
+    # "service keygen is required by server but is disabled".
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+        required: false
+      redis:
+        condition: service_started
   attacker:
     container_name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME required}-attacker
     image: ssh-compression-poc-bench/attacker:latest
@@ -29,3 +43,11 @@ services:
     container_name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME required}-client
     image: ssh-compression-poc-bench/client:latest
     ports: !override []
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+        required: false
+      attacker:
+        condition: service_started
+      redis:
+        condition: service_started
