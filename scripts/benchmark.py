@@ -768,6 +768,20 @@ def main() -> int:
         all_passed = all(s["trials_failed"] == 0 for s in summary.values())
         success = all_passed and not failures and not early_exit_triggered
 
+        # Classify failures so the caller (e.g. sweep_min_margin.sh) can
+        # tell "algorithm wasn't strong enough at this min_margin"
+        # (FAIL/CANCELLED — bumping mm may help) from "infrastructure
+        # broke" (ERROR / setup failure — bumping mm won't help, abort).
+        # CANCELLED is a downstream consequence of *whatever* tripped
+        # early-exit first, so we look for ERROR explicitly to decide.
+        technical_errors = [
+            r for r in results if str(r.get("status", "")).startswith("ERROR:")
+        ]
+        had_technical_failure = bool(failures) or bool(technical_errors)
+        if technical_errors:
+            print(f"!! {len(technical_errors)} technical error(s) "
+                  f"(non-algorithmic); first: {technical_errors[0]['status']}")
+
         with open(args.output, "w") as f:
             json.dump({
                 "config": {
@@ -816,7 +830,15 @@ def main() -> int:
                 ])
         print(f"CSV summary -> {args.csv_summary}")
 
-        return 0 if success else 1
+        # Exit codes:
+        #   0 = all trials passed
+        #   1 = algorithmic miss only (sweep can try a higher min_margin)
+        #   2 = technical failure occurred (sweep should abort entirely)
+        if success:
+            return 0
+        if had_technical_failure:
+            return 2
+        return 1
     finally:
         if not args.keep_up and not args.no_up:
             print("\n=== Tearing down stacks ===")

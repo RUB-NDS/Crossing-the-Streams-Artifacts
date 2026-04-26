@@ -112,7 +112,7 @@ for scenario_key in "${SCENARIO_ORDER[@]}"; do
             if [ "$EARLY_EXIT" = "1" ]; then
                 ee_args+=(--early-exit)
             fi
-            if python3 -u scripts/benchmark.py \
+            python3 -u scripts/benchmark.py \
                 --stacks "$STACKS" \
                 --trials "$TRIALS" \
                 --variants "$variant" \
@@ -121,14 +121,33 @@ for scenario_key in "${SCENARIO_ORDER[@]}"; do
                 --output "$results_json" \
                 --csv-summary "$summary_csv" \
                 "${ee_args[@]}" \
-                "${extra_args[@]}" 2>&1 | filter_docker_noise; then
-                echo "### $scenario_key/$variant mm=$mm: 100% success — stop"
-                succeeded=1
-                break
-            fi
-
-            echo "### $scenario_key/$variant mm=$mm: not yet 100% — increasing"
-            mm=$((mm + MM_STEP))
+                "${extra_args[@]}" 2>&1 | filter_docker_noise
+            # ${PIPESTATUS[0]} is benchmark.py's exit; filter is awk
+            # (always 0). With pipefail, $? would also work but PIPESTATUS
+            # makes the intent explicit.
+            rc=${PIPESTATUS[0]}
+            case "$rc" in
+                0)
+                    echo "### $scenario_key/$variant mm=$mm: 100% success — stop"
+                    succeeded=1
+                    break
+                    ;;
+                1)
+                    echo "### $scenario_key/$variant mm=$mm: not yet 100% — increasing"
+                    mm=$((mm + MM_STEP))
+                    ;;
+                2)
+                    echo "### $scenario_key/$variant mm=$mm: TECHNICAL FAILURE" \
+                         "(infrastructure error, not an algorithmic miss)." \
+                         "Aborting entire sweep — fix the underlying issue and re-run."
+                    exit 2
+                    ;;
+                *)
+                    echo "### $scenario_key/$variant mm=$mm: benchmark.py" \
+                         "exited with unexpected code $rc. Aborting sweep."
+                    exit "$rc"
+                    ;;
+            esac
         done
 
         if [ "$succeeded" -eq 0 ]; then

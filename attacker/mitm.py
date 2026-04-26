@@ -248,7 +248,12 @@ async def handle_exploit(request: web.Request) -> web.Response:
 
 
 async def handle_ws(request: web.Request) -> web.WebSocketResponse:
-    ws = web.WebSocketResponse()
+    # heartbeat=30 sends a WebSocket ping every 30s; if the browser
+    # doesn't pong back, aiohttp closes the connection so a half-open
+    # bridge gets reaped promptly instead of lingering until the next
+    # /run_attack notices it. Without this, idle disconnects between
+    # trials surface as 503s on the next attack.
+    ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
 
     BROWSER_BRIDGE.set_ws(ws)
@@ -323,9 +328,16 @@ async def handle_run_attack(request: web.Request) -> web.Response:
             {"ok": False, "error": f"unknown variant {variant!r}"}, status=400,
         )
     if variant == "beast" and not BROWSER_BRIDGE.connected:
-        return web.json_response(
-            {"ok": False, "error": "browser not connected"}, status=503,
-        )
+        # The bridge may be momentarily down between trials (browser
+        # mid-reconnect after a heartbeat-detected drop). Give it a
+        # bounded grace period before declaring 503 — most transient
+        # disconnects clear within a couple of seconds.
+        try:
+            await BROWSER_BRIDGE.wait_ready(timeout=10)
+        except asyncio.TimeoutError:
+            return web.json_response(
+                {"ok": False, "error": "browser not connected"}, status=503,
+            )
     if _ATTACK_LOCK.locked():
         return web.json_response(
             {"ok": False, "error": "another attack is in progress"}, status=409,
