@@ -32,6 +32,23 @@ set -uo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Strip docker compose progress + buildkit step output from a stream
+# while keeping benchmark.py prints and any Python tracebacks. Used as
+# a pipeline filter on benchmark.py's combined stdout+stderr.
+#   - "Network|Container|Volume|Image  <name>  <Creating|Created|...>"
+#     are emitted by `docker compose up` / `down`
+#   - "#NN ..." and "[+] Building" / "  => " come from buildkit
+# awk always exits 0, so pipefail still surfaces python's exit status.
+filter_docker_noise() {
+    awk '
+        /^[[:space:]]*(Network|Container|Volume|Image)[[:space:]].*(Creating|Created|Starting|Started|Stopping|Stopped|Removing|Removed|Recreating|Recreated|Killing|Killed|Waiting|Healthy|Running|Pulling|Pulled|Building|Built)[[:space:]]*$/ { next }
+        /^#[0-9]+([[:space:]]|$)/ { next }
+        /^\[\+\] /                 { next }
+        /^[[:space:]]+=> /         { next }
+        { print; fflush() }
+    '
+}
+
 STACKS="${STACKS:-20}"
 TRIALS="${TRIALS:-100}"
 FIXED_NL_DIRECT="${FIXED_NL_DIRECT:-2}"
@@ -95,7 +112,7 @@ for scenario_key in "${SCENARIO_ORDER[@]}"; do
             if [ "$EARLY_EXIT" = "1" ]; then
                 ee_args+=(--early-exit)
             fi
-            if python3 scripts/benchmark.py \
+            if python3 -u scripts/benchmark.py \
                 --stacks "$STACKS" \
                 --trials "$TRIALS" \
                 --variants "$variant" \
@@ -104,7 +121,7 @@ for scenario_key in "${SCENARIO_ORDER[@]}"; do
                 --output "$results_json" \
                 --csv-summary "$summary_csv" \
                 "${ee_args[@]}" \
-                "${extra_args[@]}" >/dev/null 2>&1; then
+                "${extra_args[@]}" 2>&1 | filter_docker_noise; then
                 echo "### $scenario_key/$variant mm=$mm: 100% success — stop"
                 succeeded=1
                 break
