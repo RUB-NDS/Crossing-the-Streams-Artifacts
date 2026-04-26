@@ -22,11 +22,12 @@ import secrets
 from typing import TYPE_CHECKING, Any
 
 from attacker.attack.config import AttackConfig, AlignmentMode
-from attacker.attack import host_cache
 
 if TYPE_CHECKING:
     import aiohttp
 
+CLIENT_BASE = os.environ.get("CLIENT_CONTROL_URL", "http://client:8000")
+CLIENT_HOST = os.environ.get("CLIENT_HOST", "client")
 TUNNEL_PORT = int(os.environ.get("TUNNEL_PORT", "6379"))
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "2222"))
 
@@ -69,7 +70,7 @@ class DirectAdapter:
             await asyncio.sleep(cfg.settle)
 
         # 4-5. Refresh secret
-        async with self._session.post(f"{host_cache.client_base()}/send_secret") as r:
+        async with self._session.post(f"{CLIENT_BASE}/send_secret") as r:
             await r.read()
         if cfg.settle > 0:
             await asyncio.sleep(cfg.settle)
@@ -126,7 +127,7 @@ class DirectAdapter:
 async def _open_tunnel(retries: int = 20, delay: float = 1.0) -> tuple:
     for attempt in range(1, retries + 1):
         try:
-            return await asyncio.open_connection(host_cache.client_host(), TUNNEL_PORT)
+            return await asyncio.open_connection(CLIENT_HOST, TUNNEL_PORT)
         except (OSError, ConnectionRefusedError):
             if attempt >= retries:
                 raise

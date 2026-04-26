@@ -42,7 +42,6 @@ from attacker.attack.engine import run_attack as run_unified_attack
 from attacker.attack.adapters.direct import DirectAdapter
 from attacker.attack.adapters.beast import BeastAdapter
 from attacker.attack.adapters.ansible import AnsibleAdapter
-from attacker.attack import host_cache
 
 LOG = logging.getLogger("attacker")
 
@@ -50,6 +49,8 @@ SERVER_HOST = os.environ.get("SERVER_HOST", "server")
 SERVER_PORT = int(os.environ.get("SERVER_PORT", "22"))
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "2222"))
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "9000"))
+CLIENT_CONTROL_URL = os.environ.get("CLIENT_CONTROL_URL", "http://client:8000")
+CLIENT_HOST = os.environ.get("CLIENT_HOST", "client")
 TUNNEL_PORT = int(os.environ.get("TUNNEL_PORT", "6379"))
 
 SNIFF_FILTER = f"tcp and (port {SERVER_PORT} or port {LISTEN_PORT})"
@@ -184,7 +185,7 @@ async def handle_status(request: web.Request) -> web.Response:
         "ok": True,
         "server_target": f"{SERVER_HOST}:{SERVER_PORT}",
         "listen_port": LISTEN_PORT,
-        "client_control_url": host_cache.client_base(),
+        "client_control_url": CLIENT_CONTROL_URL,
         "sniff_iface": SNIFF_IFACE,
         "sniff_filter": SNIFF_FILTER,
         "packet_log_len": len(PACKET_LOG),
@@ -207,7 +208,7 @@ async def handle_clear_log(request: web.Request) -> web.Response:
 
 async def handle_trigger_secret(request: web.Request) -> web.Response:
     session: aiohttp.ClientSession = request.app["http"]
-    async with session.post(f"{host_cache.client_base()}/send_secret") as resp:
+    async with session.post(f"{CLIENT_CONTROL_URL}/send_secret") as resp:
         body = await resp.json()
         return web.json_response({"ok": True, "client_response": body})
 
@@ -222,7 +223,7 @@ async def handle_trigger_payload(request: web.Request) -> web.Response:
     payload = await request.read()
     try:
         reader, writer = await asyncio.open_connection(
-            host_cache.client_host(), TUNNEL_PORT,
+            CLIENT_HOST, TUNNEL_PORT,
         )
         writer.write(payload)
         await writer.drain()
@@ -396,14 +397,6 @@ async def main() -> int:
 
     sniffer = start_sniffer()
 
-    # Resolve the client hostname exactly once. All subsequent attacker
-    # → client traffic (aiohttp posts in handlers/adapters,
-    # asyncio.open_connection in handle_trigger_payload + adapter
-    # measurement loops) reads the cached IP, so Docker's embedded
-    # 127.0.0.11 resolver sees one query per attacker container instead
-    # of one per measurement × N parallel stacks.
-    await host_cache.resolve_once()
-
     # Start the TCP forwarder.
     forwarder = await asyncio.start_server(
         handle_inbound, host="0.0.0.0", port=LISTEN_PORT,
@@ -411,12 +404,8 @@ async def main() -> int:
     sockets = ", ".join(str(s.getsockname()) for s in forwarder.sockets)
     LOG.info("TCP forwarder listening on %s -> %s:%d", sockets, SERVER_HOST, SERVER_PORT)
 
-    # Start the HTTP control API. ttl_dns_cache=86400 is defence in
-    # depth — call sites already pass the resolved IP, but if any path
-    # ever slips a hostname through, aiohttp won't re-query for a day.
-    http_session = aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(use_dns_cache=True, ttl_dns_cache=86400),
-    )
+    # Start the HTTP control API.
+    http_session = aiohttp.ClientSession()
     app = web.Application()
     app["http"] = http_session
     app.router.add_get("/status", handle_status)
