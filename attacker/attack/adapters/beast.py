@@ -17,7 +17,8 @@ import secrets
 from typing import TYPE_CHECKING, Any
 
 from attacker.attack.config import AttackConfig, AlignmentMode
-from attacker.attack.adapters.direct import CLIENT_BASE, _sum_c2s
+from attacker.attack.adapters.direct import _sum_c2s
+from attacker.attack import host_cache
 
 if TYPE_CHECKING:
     import aiohttp
@@ -54,7 +55,7 @@ class BeastAdapter:
             await asyncio.sleep(cfg.settle)
 
         # 2. Trigger secret
-        async with self._session.post(f"{CLIENT_BASE}/send_secret") as r:
+        async with self._session.post(f"{host_cache.client_base()}/send_secret") as r:
             await r.read()
         if cfg.settle > 0:
             await asyncio.sleep(cfg.settle)

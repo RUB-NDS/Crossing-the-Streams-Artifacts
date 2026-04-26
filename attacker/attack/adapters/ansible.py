@@ -25,14 +25,14 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from attacker.attack.config import AttackConfig, AlignmentMode
-from attacker.attack.adapters.direct import CLIENT_BASE, _sum_c2s
+from attacker.attack.adapters.direct import _sum_c2s
+from attacker.attack import host_cache
 
 if TYPE_CHECKING:
     import aiohttp
 
 LOG = logging.getLogger("attack.ansible")
 
-CLIENT_HOST = os.environ.get("CLIENT_HOST", "client")
 ANSIBLE_TUNNEL_PORT = int(os.environ.get("ANSIBLE_TUNNEL_PORT", "15432"))
 
 
@@ -57,7 +57,7 @@ class AnsibleAdapter:
         assert cfg is not None and self._session is not None
 
         # 1. Trigger ansible-playbook run (blocks until password in flight)
-        async with self._session.post(f"{CLIENT_BASE}/send_secret_ansible") as r:
+        async with self._session.post(f"{host_cache.client_base()}/send_secret_ansible") as r:
             body = await r.json()
             if not body.get("ok", False):
                 raise RuntimeError(f"send_secret_ansible failed: {body}")
@@ -125,7 +125,7 @@ class AnsibleAdapter:
 async def _open_ansible_tunnel(retries: int = 20, delay: float = 0.25) -> tuple:
     for attempt in range(1, retries + 1):
         try:
-            return await asyncio.open_connection(CLIENT_HOST, ANSIBLE_TUNNEL_PORT)
+            return await asyncio.open_connection(host_cache.client_host(), ANSIBLE_TUNNEL_PORT)
         except (OSError, ConnectionRefusedError):
             if attempt >= retries:
                 raise
