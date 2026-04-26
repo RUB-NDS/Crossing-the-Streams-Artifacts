@@ -45,6 +45,12 @@ filter_docker_noise() {
         /^#[0-9]+([[:space:]]|$)/ { next }
         /^\[\+\] /                 { next }
         /^[[:space:]]+=> /         { next }
+        # Drop empty lines too — buildkit and compose use them as visual
+        # separators that no longer make sense once their content is
+        # filtered out, and benchmark.py uses leading-\n on its section
+        # headers ("\n=== ... ===") so its own blank lines come through
+        # the header carriage anyway.
+        /^[[:space:]]*$/           { next }
         { print; fflush() }
     '
 }

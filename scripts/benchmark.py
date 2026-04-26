@@ -401,9 +401,23 @@ def run_variant(
 # Per-stack worker (one thread per stack, trials sequential within)
 # ---------------------------------------------------------------------------
 
+_PRINT_LOCK = threading.Lock()
+
+
+def _tprint(msg: str) -> None:
+    """Thread-safe print: writes the line + newline as a single
+    sys.stdout.write so concurrent worker threads don't interleave
+    halfway through a line. Plain print() does write(s) then write('\\n')
+    as two calls, which can split under load."""
+    with _PRINT_LOCK:
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+
+
 def worker(
     stack_idx: int,
     project: str,
+    project_width: int,
     trial_indices: list[int],
     passwords: list[str],
     variants: list[str],
@@ -416,7 +430,10 @@ def worker(
     stop_event: threading.Event,
     attacker_bases: list[str],
 ) -> None:
-    tag = f"[stack {stack_idx:02d} {project}]"
+    # Pad project name to a fixed width so single-digit and two-digit
+    # stack ids ("bench-0" vs "bench-10") still line up at the closing
+    # bracket and beyond.
+    tag = f"[stack {stack_idx:02d} {project:<{project_width}}]"
     try:
         attacker_ip = inspect_ip(f"{project}-attacker")
         client_ip = inspect_ip(f"{project}-client")
@@ -425,12 +442,12 @@ def worker(
         with results_lock:
             attacker_bases.append(attacker_base)
         need_browser = "beast" in variants
-        print(f"{tag} waiting for readiness at {attacker_base} / {client_base}"
-              f" (browser={'yes' if need_browser else 'no'})", flush=True)
+        _tprint(f"{tag} waiting for readiness at {attacker_base} / {client_base}"
+                f" (browser={'yes' if need_browser else 'no'})")
         wait_ready(attacker_base, client_base, need_browser=need_browser)
-        print(f"{tag} ready; {len(trial_indices)} trial(s) assigned", flush=True)
+        _tprint(f"{tag} ready; {len(trial_indices)} trial(s) assigned")
     except Exception as exc:  # noqa: BLE001
-        print(f"{tag} SETUP FAILED: {exc}", flush=True)
+        _tprint(f"{tag} SETUP FAILED: {exc}")
         failures.append(f"{project}: setup: {exc}")
         return
 
@@ -492,9 +509,8 @@ def worker(
             }
             with results_lock:
                 results.append(row)
-            print(f"{tag} trial={trial_idx:3d} variant={variant:7s} "
-                  f"guesses={result['total_guesses']:>7} wall={wall:6.1f}s  {status}",
-                  flush=True)
+            _tprint(f"{tag} trial={trial_idx:3d} variant={variant:7s} "
+                    f"guesses={result['total_guesses']:>7} wall={wall:6.1f}s  {status}")
 
             if early_exit and not ok:
                 with results_lock:
@@ -503,8 +519,8 @@ def worker(
                         stop_event.set()
                     bases_snapshot = list(attacker_bases)
                 if first_failure:
-                    print(f"{tag} early-exit: broadcasting /cancel to "
-                          f"{len(bases_snapshot)} stack(s)", flush=True)
+                    _tprint(f"{tag} early-exit: broadcasting /cancel to "
+                            f"{len(bases_snapshot)} stack(s)")
                     _broadcast_cancel(bases_snapshot)
                 return
 
@@ -736,10 +752,12 @@ def main() -> int:
         attacker_bases: list[str] = []
         worker_threads = []
         started = time.time()
+        project_width = max(len(p) for p in projects)
         for i, p in enumerate(projects):
             t = threading.Thread(
                 target=worker,
-                args=(i, p, assignments[i], passwords, variants,
+                args=(i, p, project_width,
+                      assignments[i], passwords, variants,
                       args.alphabet, config_override, args.early_exit,
                       results, results_lock, failures,
                       stop_event, attacker_bases),
