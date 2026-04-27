@@ -425,6 +425,7 @@ def worker(
     pw_alphabet: str,
     config_override: dict,
     early_exit: bool,
+    max_retries: int,
     results: list[dict],
     results_lock: threading.Lock,
     failures: list[str],
@@ -460,33 +461,48 @@ def worker(
             if early_exit and stop_event.is_set():
                 return
             t0 = time.time()
-            try:
-                result = run_variant(variant, config_override,
-                                     attacker_base, client_base,
-                                     password, pw_alphabet,
-                                     early_exit=early_exit)
-                ok = result["recovered"] == password
-                if ok:
-                    status = "PASS"
-                elif result.get("abort_reason") == "cancelled":
-                    status = "CANCELLED"
-                else:
+            max_attempts = 1 + max_retries
+            attempts_used = 0
+            result: dict = {}
+            ok = False
+            status = ""
+            for attempt in range(1, max_attempts + 1):
+                if early_exit and stop_event.is_set():
+                    # Sibling thread broadcast /cancel; abandon retries.
+                    break
+                attempts_used = attempt
+                try:
+                    result = run_variant(variant, config_override,
+                                         attacker_base, client_base,
+                                         password, pw_alphabet,
+                                         early_exit=early_exit)
+                    ok = result["recovered"] == password
+                    if ok:
+                        status = "PASS"
+                        break
+                    if result.get("abort_reason") == "cancelled":
+                        # External cancel from another stack — don't retry.
+                        status = "CANCELLED"
+                        break
                     status = f"FAIL(expected={password!r}, got={result['recovered']!r})"
-            except Exception as exc:  # noqa: BLE001
-                result = {
-                    "recovered": f"<error: {exc}>",
-                    "phase1_guesses": -1,
-                    "phase2_guesses": -1,
-                    "total_guesses": -1,
-                    "elapsed": 0.0,
-                    "phase1_per_position": [],
-                    "phase2_per_position": [],
-                    "phase1_aborted": False,
-                    "phase2_aborted": False,
-                    "abort_reason": None,
-                }
-                ok = False
-                status = f"ERROR: {exc}"
+                except Exception as exc:  # noqa: BLE001
+                    result = {
+                        "recovered": f"<error: {exc}>",
+                        "phase1_guesses": -1,
+                        "phase2_guesses": -1,
+                        "total_guesses": -1,
+                        "elapsed": 0.0,
+                        "phase1_per_position": [],
+                        "phase2_per_position": [],
+                        "phase1_aborted": False,
+                        "phase2_aborted": False,
+                        "abort_reason": None,
+                    }
+                    ok = False
+                    status = f"ERROR: {exc}"
+                if attempt < max_attempts:
+                    _tprint(f"{tag} trial={trial_idx:3d} variant={variant:7s} "
+                            f"attempt {attempt}/{max_attempts} {status}; retrying")
             wall = time.time() - t0
             row = {
                 "stack": stack_idx,
@@ -507,11 +523,13 @@ def worker(
                 "abort_reason": result.get("abort_reason"),
                 "wall_seconds": wall,
                 "status": status,
+                "attempts": attempts_used,
             }
             with results_lock:
                 results.append(row)
+            attempt_tag = f" (after {attempts_used}/{max_attempts} attempts)" if attempts_used > 1 else ""
             _tprint(f"{tag} trial={trial_idx:3d} variant={variant:7s} "
-                    f"guesses={result['total_guesses']:>7} wall={wall:6.1f}s  {status}")
+                    f"guesses={result['total_guesses']:>7} wall={wall:6.1f}s  {status}{attempt_tag}")
 
             if early_exit and not ok:
                 with results_lock:
@@ -656,6 +674,12 @@ def main() -> int:
                          "the engine's `expected` parameter from the known "
                          "password and broadcasts /cancel to all stacks on "
                          "failure")
+    ap.add_argument("--max-retries", type=int, default=0,
+                    help="if a recovery fails, retry the same password this "
+                         "many additional times before recording it as a "
+                         "failure (e.g. --max-retries 2 = up to 3 attempts). "
+                         "Used by sweep_min_margin.sh to absorb transient "
+                         "noise before bumping min_margin.")
     args = ap.parse_args()
 
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
@@ -707,6 +731,9 @@ def main() -> int:
     print(f"  config label  : {config_override['label']}")
     if args.min_margin is not None:
         print(f"  min_margin    : {args.min_margin} (override)")
+    if args.max_retries > 0:
+        print(f"  max_retries   : {args.max_retries} "
+              f"(up to {1 + args.max_retries} attempts per password)")
     print(f"  projects      : {projects[:4]}{' ...' if len(projects) > 4 else ''}")
     print(f"  per-stack load: {[len(a) for a in assignments][:8]}"
           f"{' ...' if args.stacks > 8 else ''}")
@@ -760,6 +787,7 @@ def main() -> int:
                 args=(i, p, project_width,
                       assignments[i], passwords, variants,
                       args.alphabet, config_override, args.early_exit,
+                      args.max_retries,
                       results, results_lock, failures,
                       stop_event, attacker_bases),
                 daemon=True,
@@ -813,6 +841,7 @@ def main() -> int:
                     "scenario": args.scenario,
                     "config_label": config_override["label"],
                     "early_exit": args.early_exit,
+                    "max_retries": args.max_retries,
                 },
                 "passwords": passwords,
                 "results": results,

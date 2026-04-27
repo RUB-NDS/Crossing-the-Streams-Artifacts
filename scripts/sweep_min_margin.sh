@@ -20,6 +20,11 @@
 #                                   so a doomed mm-step aborts on first
 #                                   wrong commit instead of running every
 #                                   trial to completion
+#   MAX_RETRIES      (default 2)    on a failed recovery, retry the same
+#                                   password this many extra times before
+#                                   recording it as a true failure
+#                                   (default = 3 attempts per password).
+#                                   Absorbs transient noise before bumping mm.
 #
 # Notes:
 #   - beast is skipped for baseline + candidate-elimination (these use
@@ -63,6 +68,7 @@ MM_START="${MM_START:-8}"
 MM_STEP="${MM_STEP:-8}"
 MM_MAX="${MM_MAX:-128}"
 EARLY_EXIT="${EARLY_EXIT:-1}"
+MAX_RETRIES="${MAX_RETRIES:-2}"
 
 # scenario_key -> benchmark.py --scenario preset name
 declare -A PRESET=(
@@ -124,6 +130,7 @@ for scenario_key in "${SCENARIO_ORDER[@]}"; do
                 --variants "$variant" \
                 --scenario "$preset" \
                 --min-margin "$mm" \
+                --max-retries "$MAX_RETRIES" \
                 --output "$results_json" \
                 --csv-summary "$summary_csv" \
                 "${ee_args[@]}" \
