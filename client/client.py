@@ -731,6 +731,37 @@ class SSHState:
 # ---------------------------------------------------------------------------
 
 
+async def _retry_call(coro_factory, *, op_name: str,
+                      attempts: int = 3, delay: float = 1.0):
+    """Call ``coro_factory()`` with retries on any exception.
+
+    ``coro_factory`` is a no-arg callable returning a fresh coroutine on
+    every call (a coroutine can only be awaited once, so we can't accept
+    a pre-built one). Used by the per-trial handlers to absorb transient
+    connection failures (e.g. ``ssh: Connection timed out`` from chpasswd
+    when the host is saturated under a 100-stack benchmark).
+    """
+    last_exc: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await coro_factory()
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < attempts:
+                LOG.warning(
+                    "%s attempt %d/%d failed: %s; retrying in %.1fs",
+                    op_name, attempt, attempts, exc, delay,
+                )
+                await asyncio.sleep(delay)
+            else:
+                LOG.warning(
+                    "%s attempt %d/%d failed: %s; giving up",
+                    op_name, attempt, attempts, exc,
+                )
+    assert last_exc is not None
+    raise last_exc
+
+
 async def handle_status(request: web.Request) -> web.Response:
     state: SSHState = request.app["ssh"]
     return web.json_response(state.status())
@@ -755,10 +786,14 @@ async def handle_set_secret(request: web.Request) -> web.Response:
             {"ok": False, "error": "missing string 'value'"}, status=400,
         )
     LOG.info("set_secret: new value length %d", len(new_value))
-    try:
+
+    async def _do() -> None:
         await state.reconfigure_redis(new_value)
         state.secret_value = new_value
         await state.reconnect()
+
+    try:
+        await _retry_call(_do, op_name="set_secret")
     except Exception as exc:  # noqa: BLE001
         LOG.exception("set_secret failed")
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
@@ -777,7 +812,10 @@ async def handle_reset(request: web.Request) -> web.Response:
 async def handle_send_secret_ansible(request: web.Request) -> web.Response:
     state: SSHState = request.app["ssh"]
     try:
-        result = await state.send_secret_ansible()
+        result = await _retry_call(
+            lambda: state.send_secret_ansible(),
+            op_name="send_secret_ansible",
+        )
     except asyncio.TimeoutError as exc:
         LOG.exception("send_secret_ansible timed out")
         return web.json_response(
@@ -801,7 +839,10 @@ async def handle_set_sudo_secret(request: web.Request) -> web.Response:
         )
     LOG.info("set_sudo_secret: new value length %d", len(new_value))
     try:
-        await state.set_sudo_password(new_value)
+        await _retry_call(
+            lambda: state.set_sudo_password(new_value),
+            op_name="set_sudo_password",
+        )
     except Exception as exc:  # noqa: BLE001
         LOG.exception("set_sudo_secret failed")
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
