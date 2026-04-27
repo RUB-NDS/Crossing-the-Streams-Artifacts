@@ -133,7 +133,8 @@ def http(
     url: str,
     method: str = "GET",
     body: Any = None,
-    timeout: float = 7200.0,
+    timeout: float = 86400.0,  # 24h — slow scenarios (BEAST + high min_margin
+                               # + adaptive sweep) can legitimately run multi-hour
 ) -> dict:
     data = None
     headers = {}
