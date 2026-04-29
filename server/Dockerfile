@@ -11,7 +11,7 @@ RUN apt-get update \
 RUN useradd -m -s /bin/bash victim \
  && passwd -d victim
 
-# The Ansible variant attacks the password that `become: yes` sends over
+# The Ansible scenario attacks the password that `become: yes` sends over
 # stdin, so victim must have passworded sudo configured.
 RUN echo 'victim ALL=(ALL:ALL) ALL' > /etc/sudoers.d/victim \
  && chmod 440 /etc/sudoers.d/victim

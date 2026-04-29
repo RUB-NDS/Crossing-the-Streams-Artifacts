@@ -1,4 +1,4 @@
-"""End-to-end verification for the direct-injection variant (Section 5.1).
+"""End-to-end verification for the direct-injection scenario (Section 5.1).
 
 Run from the host while the docker-compose stack is up:
 
@@ -56,10 +56,10 @@ def fail(msg: str) -> "NoReturn":  # type: ignore[name-defined]
     sys.exit(1)
 
 
-def _run_attack(variant: str, known_prefix: str, alphabet: str,
+def _run_attack(scenario: str, known_prefix: str, alphabet: str,
                    max_length: int) -> dict:
     body = json.dumps({
-        "variant": variant,
+        "scenario": scenario,
         "config": {
             "known_prefix": known_prefix,
             "alphabet": alphabet,
@@ -138,7 +138,7 @@ def main() -> int:
         fail("no TCP segments observed during Redis tunnel injection")
     print("  [ok] attacker observed packets while injecting through Redis tunnel")
 
-    step("6. Direct variant: recover hunter2 through /run_attack")
+    step("6. Direct scenario: recover hunter2 through /run_attack")
     http("POST", f"{CLIENT_BASE}/set_secret",
          body=json.dumps({"value": "hunter2"}).encode("utf-8"))
     time.sleep(2.0)

@@ -1,5 +1,5 @@
 ---
-# Minimal Ansible playbook used by the Ansible attack variant (Section 5.3).
+# Minimal Ansible playbook used by the Ansible attack scenario (Section 5.3).
 #
 # The point of the playbook is not to do anything useful on the server: it
 # exists to reproduce the wire behaviour of `become: yes` with sudo --

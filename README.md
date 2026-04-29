@@ -32,7 +32,7 @@ describes how to reproduce the artifact.
 # 1. Build the images and bring everything up.
 docker compose up -d --build
 
-# 2. Run the per-variant verifications. Each recovers "hunter2" end-to-end.
+# 2. Run the per-scenario verifications. Each recovers "hunter2" end-to-end.
 python scripts/verify_direct.py     # section 5.1, ~2 min
 python scripts/verify_browser.py    # section 5.2, ~17 min
 python scripts/verify_ansible.py    # section 5.3, ~4 min
@@ -44,27 +44,37 @@ docker compose logs -f attacker
 
 ## Reproducing Table 2
 
-Table 2 in the paper (a five-row × three-variant guess-count table) is
-produced by `scripts/benchmark.py`, which spawns N independent
-docker-compose projects in parallel via `docker-compose.bench.yml`. A
-wrapper script, `scripts/sweep_min_margin.sh`, sweeps the commit
-margin (`min_margin` in the code, `μ` in the paper) per
-(variant, scenario) until 100% recovery is reached. Outputs land
-under `results/{baseline,sweep,adaptive,elim,full}/`.
+Table 2 in the paper is produced by `scripts/benchmark.py`, which
+spawns N independent docker-compose projects in parallel via
+`docker-compose.bench.yml`. A wrapper script,
+`scripts/sweep_min_margin.sh`, sweeps the commit margin (`min_margin`
+in the code, `μ` in the paper) per (scenario, optimization) until
+100% recovery is reached. Outputs land under
+`results/{NO,FS,AS,CE,FSCE,ASCE}/`, where the directory names match
+the optimization labels from Table 2:
+
+| Label  | Optimization                                                   |
+| :----- | :------------------------------------------------------------- |
+| `NO`   | No further optimization (fixed alignment length).              |
+| `FS`   | Full alignment sweep.                                          |
+| `AS`   | Adaptive alignment sweep.                                      |
+| `CE`   | Candidate elimination (fixed alignment length).                |
+| `FSCE` | Full alignment sweep combined with candidate elimination.      |
+| `ASCE` | Adaptive alignment sweep combined with candidate elimination.  |
 
 ```bash
-# All five scenarios, all three variants, default 100 trials each.
+# All six optimizations, all three scenarios, default 100 trials each.
 scripts/sweep_min_margin.sh
 
-# A single scenario / variant / commit margin.
+# A single scenario / optimization / commit margin.
 python scripts/benchmark.py \
     --stacks 4 --trials 100 \
-    --variants direct \
-    --scenario all-opts
+    --scenarios direct \
+    --optimization ASCE
 ```
 
 `scripts/benchmark.py` writes `benchmark_results.json` (per-trial
-detail) and `benchmark_summary.csv` (per-`(variant, scenario)`
+detail) and `benchmark_summary.csv` (per-`(scenario, optimization)`
 aggregates). `scripts/stats.py` prints a mean / median / stdev summary
 from a results file.
 
@@ -108,7 +118,7 @@ attacker/
             direct.py              — raw-TCP injection
             browser.py             — browser sendBeacon injection
             ansible.py             — fresh-SSH-per-guess injection
-            browser_bridge.py      — WebSocket bridge for browser variant
+            browser_bridge.py      — WebSocket bridge for browser scenario
         tests/                     — plain-assertion sanity tests
 ```
 
@@ -126,14 +136,14 @@ Docker bridge network (`sshpoc`):
   `AllowTcpForwarding yes`.
 - **`poc-client`** — the victim host. Runs an OpenSSH subprocess with
   two local port forwards, redis-py, a headless Firefox via
-  Playwright (browser variant), and `ansible-playbook` on demand.
+  Playwright (browser scenario), and `ansible-playbook` on demand.
   Exposes an aiohttp HTTP control API on port 8000.
 - **`poc-attacker`** — three jobs in one process: a passive TCP
   forwarder between the client (`:2222`) and the server (`:22`); a
   Scapy `AsyncSniffer` on `eth0` with the BPF filter
   `tcp and (port 22 or port 2222)`; and an aiohttp HTTP control API
   on port 9000 (notably `/run_attack`, the unified attack endpoint
-  that dispatches to the per-variant adapter).
+  that dispatches to the per-scenario adapter).
 
 The client connects to the attacker on `:2222` but pins the **real**
 server's host key in `known_hosts`. The attacker is a passive on-path
@@ -165,7 +175,7 @@ in-the-middle attempt would be detected at the SSH layer.
 | POST   | `/trigger_payload` | Writes a raw payload through the client's Redis tunnel.                                      |
 | GET    | `/exploit`         | Serves the browser-injection exploit page.                                                   |
 | GET    | `/ws`              | WebSocket endpoint for the victim's browser.                                                 |
-| POST   | `/run_attack`      | Unified attack endpoint — dispatches on `variant`.                                           |
+| POST   | `/run_attack`      | Unified attack endpoint — dispatches on `scenario`.                                          |
 | POST   | `/cancel`          | Set the cancel-event so an in-flight `/run_attack` returns at the next position boundary.    |
 
 `/run_attack` request body (all `config` fields are optional; omitted
@@ -173,7 +183,7 @@ fields fall back to the adapter's `default_config()`):
 
 ```json
 {
-  "variant": "direct | browser | ansible",
+  "scenario": "direct | browser | ansible",
   "config": {
     "known_prefix":             "...",
     "alphabet":                 "abcdefghijklmnopqrstuvwxyz0123456789",
@@ -240,9 +250,9 @@ docker-compose stack. End-to-end correctness is verified by the
 - `attacker/` and `client/` sources are `COPY`'d into the images at
   build time, not bind-mounted: rebuild the relevant service after
   edits (`docker compose build attacker && docker compose up -d attacker`).
-- The alignment-data pool (`0x80..0x8F`), the per-variant
+- The alignment-data pool (`0x80..0x8F`), the per-scenario
   `min_margin`, `flush_bytes=33000`, `guess_prefill_bytes=16384`
-  (browser variant only), and the adapter-specific ordering are
+  (browser scenario only), and the adapter-specific ordering are
   load-bearing. They are documented in the paper (sections 4 and 5)
   and in the adapter docstrings.
 - The 8-byte alignment sweep (`alignment_lengths=[0..7]`) assumes

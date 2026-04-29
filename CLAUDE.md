@@ -25,9 +25,11 @@ python scripts/verify_direct.py
 python scripts/verify_browser.py
 python scripts/verify_ansible.py
 
-# Scenario benchmark (multi-stack, isolated compose projects)
-python scripts/benchmark.py --stacks 4 --trials 100 --scenario all-opts
-python scripts/benchmark.py --stacks 2 --trials 50 --variants direct --scenario baseline --fixed-al 1
+# Scenario benchmark (multi-stack, isolated compose projects).
+# --scenarios   = subset of {direct, browser, ansible}.
+# --optimization = paper Table 2 labels: NO, FS, AS, CE, FSCE, ASCE.
+python scripts/benchmark.py --stacks 4 --trials 100 --optimization ASCE
+python scripts/benchmark.py --stacks 2 --trials 50 --scenarios direct --optimization NO --fixed-al 1
 
 # Min-margin (commit-margin) sweep harness (Table 2 in the paper).
 # Exit-code contract: 0 = 100% success, 1 = algorithmic miss (sweep can
@@ -55,7 +57,7 @@ those ports are mapped only by the default `docker-compose.yml`.
 
 ### Engine + adapter split
 
-All three variants share `attacker/attack/engine.py` (round loop,
+All three scenarios share `attacker/attack/engine.py` (round loop,
 candidate ranking, alignment sweep, per-position metrics, outlier
 retry). The engine calls one method on the adapter:
 
@@ -82,7 +84,7 @@ engine. The three adapters:
 
 Adapter selection happens at one place: `handle_run_attack` in
 `attacker/mitm.py`. The request body is
-`{"variant": "direct|browser|ansible", "config": {...}}`; each adapter
+`{"scenario": "direct|browser|ansible", "config": {...}}`; each adapter
 exposes a `default_config()` classmethod, and `AttackConfig.overlay()`
 applies caller overrides on top (`attacker/attack/config.py`).
 
@@ -135,7 +137,7 @@ which writes sibling container IPs into `/etc/hosts` so the main
 process never queries Docker's embedded DNS resolver under burst load.
 
 Results: `benchmark_results.json` (per-trial, per-position detail) and
-`benchmark_summary.csv` (per-`(variant, scenario)` aggregates).
+`benchmark_summary.csv` (per-`(scenario, optimization)` aggregates).
 `scripts/stats.py <results.json>` prints n / min / max / mean / median /
 stdev over the `total_guesses` field of passing trials.
 
@@ -147,7 +149,7 @@ stdev over the `total_guesses` field of passing trials.
 - **Do not casually change the load-bearing constants.**
   `flush_bytes=33000` and `flush_pool="secrets_random"` (direct/browser),
   `guess_prefill_bytes=16384` (browser only), alignment pool
-  `0x80..0x8F`, the per-variant `min_margin`, the adapter-specific
+  `0x80..0x8F`, the per-scenario `min_margin`, the adapter-specific
   ordering, and `outlier_threshold` are all explained in the paper
   (Sections 4 and 5) and in adapter docstrings. Changes here routinely
   collapse attack throughput.
@@ -176,7 +178,7 @@ stdev over the `total_guesses` field of passing trials.
 - `attacker/attack/config.py` -- `AttackConfig`, `AlignmentMode`,
   `overlay()` for JSON -> dataclass marshalling.
 - `attacker/attack/alignment.py` -- `_ALIGNMENT_POOL`, `make_alignment()`.
-- `attacker/attack/adapters/{direct,browser,ansible}.py` -- per-variant
+- `attacker/attack/adapters/{direct,browser,ansible}.py` -- per-scenario
   ordering + `default_config()`.
 - `attacker/attack/adapters/browser_bridge.py` -- WebSocket dispatcher
   used only by the browser adapter.
@@ -189,9 +191,9 @@ stdev over the `total_guesses` field of passing trials.
   `SCENARIO_PRESETS` is the single source of truth for the preset
   toggle combinations.
 - `scripts/sweep_min_margin.sh` -- min-margin sweep that drives
-  `benchmark.py` per (variant, scenario). Exit-code contract above.
+  `benchmark.py` per (scenario, optimization). Exit-code contract above.
 - `scripts/pin-hosts.sh` -- DNS-pinning entrypoint shared by the
   attacker / client / server images.
 - `scripts/stats.py` -- summary stats over a `benchmark_results.json`.
-- `scripts/verify_*.py` -- per-variant preconditions + one `hunter2`
+- `scripts/verify_*.py` -- per-scenario preconditions + one `hunter2`
   recovery end-to-end.

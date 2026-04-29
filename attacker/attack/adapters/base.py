@@ -34,4 +34,4 @@ class Adapter(Protocol):
 
     @classmethod
     def default_config(cls) -> AttackConfig:
-        """Variant-tuned config; scenario presets override toggle fields on top."""
+        """Scenario-tuned config; optimization presets override toggle fields on top."""

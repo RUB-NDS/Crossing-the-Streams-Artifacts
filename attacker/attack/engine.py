@@ -550,7 +550,7 @@ async def run_attack(
         )
 
     LOG.info(
-        "run_attack: variant=%s label=%r prefix=%r alphabet=%d max_len=%d "
+        "run_attack: scenario=%s label=%r prefix=%r alphabet=%d max_len=%d "
         "mode=%s lengths=%s min_margin=%d max_rounds=%d",
         adapter.__class__.__name__, config.label,
         config.known_prefix, len(config.alphabet), config.max_length,

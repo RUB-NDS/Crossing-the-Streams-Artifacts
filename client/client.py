@@ -2,14 +2,14 @@
 
 Two attack-target SSH connections live side by side in this container:
 
-1. **Redis tunnel (direct / browser variants).** An OpenSSH subprocess
+1. **Redis tunnel (direct / browser scenarios).** An OpenSSH subprocess
    ``ssh -N -C -v -L 0.0.0.0:6379:redis:6379`` stays up for the life
    of the container. The victim's application authenticates to Redis
    with ``AUTH default <password>`` through that tunnel. The attacker
-   injects by connecting to ``client:6379`` (direct variant) or by
-   driving a headless Firefox via WebSocket (browser variant).
+   injects by connecting to ``client:6379`` (direct scenario) or by
+   driving a headless Firefox via WebSocket (browser scenario).
 
-2. **Ansible variant.** The "victim" periodically runs an
+2. **Ansible scenario.** The "victim" periodically runs an
    ansible-playbook with ``become: yes``. Each playbook invocation
    spawns its own fresh ``ssh`` subprocess that uses the settings in
    ``/root/.ssh/config`` -- including a ``LocalForward`` that the user
@@ -170,7 +170,7 @@ class SSHState:
         traffic) and declares the LocalForward that the attack injects
         through -- exactly the kind of "innocent helper port forward the
         user pasted into their ssh_config and forgot about" that the
-        Ansible variant's threat model relies on.
+        Ansible scenario's threat model relies on.
 
         ``Host server-root`` is what /set_sudo_secret uses to rotate the
         victim's sudo password via chpasswd. It goes *directly* to the
@@ -771,7 +771,7 @@ async def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
-    # The Ansible variant fires a /send_secret_ansible per attack iteration;
+    # The Ansible scenario fires a /send_secret_ansible per attack iteration;
     # silence aiohttp.access so each one doesn't add a noisy line.
     logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 
@@ -825,7 +825,7 @@ async def main() -> int:
     try:
         await state.launch_browser()
     except Exception as exc:  # noqa: BLE001
-        LOG.warning("browser launch failed (browser variant unavailable): %s", exc)
+        LOG.warning("browser launch failed (browser scenario unavailable): %s", exc)
 
     await asyncio.Event().wait()
     return 0

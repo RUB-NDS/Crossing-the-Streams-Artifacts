@@ -133,7 +133,7 @@ async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter, label: str
             dst.close()
         except Exception:  # noqa: BLE001
             pass
-        # Debug-level: the Ansible variant opens thousands of short-lived
+        # Debug-level: the Ansible scenario opens thousands of short-lived
         # SSH connections and we don't want to log each one.
         LOG.debug("[%s] pipe closed (forwarded %d bytes)", label, total)
 
@@ -247,7 +247,7 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
-_ADAPTER_BY_VARIANT: dict[str, Any] = {
+_ADAPTER_BY_SCENARIO: dict[str, Any] = {
     "direct": DirectAdapter,
     "browser": BrowserAdapter,
     "ansible": AnsibleAdapter,
@@ -265,36 +265,36 @@ _ATTACK_LOCK = asyncio.Lock()
 _CANCEL_EVENT = asyncio.Event()
 
 
-def _build_adapter(adapter_cls: Any, variant: str) -> Any:
-    if variant == "direct":
+def _build_adapter(adapter_cls: Any, scenario: str) -> Any:
+    if scenario == "direct":
         return adapter_cls(packet_log=PACKET_LOG)
-    if variant == "browser":
+    if scenario == "browser":
         return adapter_cls(packet_log=PACKET_LOG, bridge=BROWSER_BRIDGE)
-    if variant == "ansible":
+    if scenario == "ansible":
         return adapter_cls(packet_log=PACKET_LOG)
-    raise NotImplementedError(f"adapter construction not wired for variant {variant!r}")
+    raise NotImplementedError(f"adapter construction not wired for scenario {scenario!r}")
 
 
 async def handle_run_attack(request: web.Request) -> web.Response:
-    """Unified attack endpoint: /run_attack with {"variant": ..., "config": {...}}."""
+    """Unified attack endpoint: /run_attack with {"scenario": ..., "config": {...}}."""
     body: dict[str, Any] = {}
     if request.body_exists:
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001
             body = {}
-    variant = body.get("variant", "direct")
+    scenario = body.get("scenario", "direct")
     overrides = dict(body.get("config", {}) or {})
     expected = body.get("expected")
     if expected is not None:
         overrides["expected"] = expected
 
-    adapter_cls = _ADAPTER_BY_VARIANT.get(variant)
+    adapter_cls = _ADAPTER_BY_SCENARIO.get(scenario)
     if adapter_cls is None:
         return web.json_response(
-            {"ok": False, "error": f"unknown variant {variant!r}"}, status=400,
+            {"ok": False, "error": f"unknown scenario {scenario!r}"}, status=400,
         )
-    if variant == "browser" and not BROWSER_BRIDGE.connected:
+    if scenario == "browser" and not BROWSER_BRIDGE.connected:
         # The bridge may be momentarily down between trials (browser
         # mid-reconnect after a heartbeat-detected drop); give it a bounded
         # grace period before declaring 503.
@@ -310,9 +310,9 @@ async def handle_run_attack(request: web.Request) -> web.Response:
         )
 
     config = adapter_cls.default_config().overlay(overrides)
-    adapter = _build_adapter(adapter_cls, variant)
+    adapter = _build_adapter(adapter_cls, scenario)
 
-    LOG.info("HTTP /run_attack: variant=%s label=%r", variant, config.label)
+    LOG.info("HTTP /run_attack: scenario=%s label=%r", scenario, config.label)
     # Consume any cancel event that arrived between trials, before acquiring
     # the lock or running the engine. Safe in asyncio's single-threaded
     # execution: no `await` between is_set() and clear().
@@ -320,7 +320,7 @@ async def handle_run_attack(request: web.Request) -> web.Response:
         _CANCEL_EVENT.clear()
         LOG.info("/run_attack pre-cancelled by pending /cancel signal")
         return web.json_response({
-            "ok": True, "variant": variant,
+            "ok": True, "scenario": scenario,
             "recovered": "",
             "elapsed_seconds": 0.0,
             "total_guesses": 0,
@@ -337,10 +337,10 @@ async def handle_run_attack(request: web.Request) -> web.Response:
         except Exception as exc:  # noqa: BLE001
             LOG.exception("unified attack failed")
             return web.json_response(
-                {"ok": False, "error": str(exc), "variant": variant}, status=500,
+                {"ok": False, "error": str(exc), "scenario": scenario}, status=500,
             )
     LOG.info("unified attack done: recovered=%r", result["recovered"])
-    return web.json_response({"ok": True, "variant": variant, **result})
+    return web.json_response({"ok": True, "scenario": scenario, **result})
 
 
 async def handle_cancel(request: web.Request) -> web.Response:
@@ -361,7 +361,7 @@ async def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
-    # The Ansible variant fires thousands of /send_secret_ansible calls per
+    # The Ansible scenario fires thousands of /send_secret_ansible calls per
     # benchmark and each one would otherwise add a noisy line.
     logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 

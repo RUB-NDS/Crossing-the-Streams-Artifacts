@@ -1,4 +1,4 @@
-"""End-to-end verification for the Ansible variant (Section 5.3).
+"""End-to-end verification for the Ansible scenario (Section 5.3).
 
 Run from the host while the docker-compose stack is up:
 
@@ -135,7 +135,7 @@ def main() -> int:
 
     print("  Phase 1: recovering CHANNEL_DATA length byte...")
     phase1_body = json.dumps({
-        "variant": "ansible",
+        "scenario": "ansible",
         "config": {
             "known_prefix": PHASE1_PREFIX,
             "alphabet": PHASE1_ALPHABET,
@@ -168,7 +168,7 @@ def main() -> int:
     print("  Phase 2: recovering password...")
     phase2_prefix = PHASE1_PREFIX + length_str
     phase2_body = json.dumps({
-        "variant": "ansible",
+        "scenario": "ansible",
         "config": {
             "known_prefix": phase2_prefix,
             "alphabet": PHASE2_ALPHABET,

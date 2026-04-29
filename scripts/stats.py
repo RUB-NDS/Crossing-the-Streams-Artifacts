@@ -1,6 +1,6 @@
 """Per-attack guess-count stats over a benchmark_results.json.
 
-One attack = one (password, variant) trial. Aggregates `total_guesses`
+One attack = one (password, scenario) trial. Aggregates `total_guesses`
 across trials where `ok == true`.
 
 Usage:

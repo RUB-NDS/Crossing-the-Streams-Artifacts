@@ -1,4 +1,4 @@
-"""End-to-end verification for the browser-injection variant (Section 5.2).
+"""End-to-end verification for the browser-injection scenario (Section 5.2).
 
 Run from the host while the docker-compose stack is up:
 
@@ -63,7 +63,7 @@ def fail(msg: str) -> "NoReturn":  # type: ignore[name-defined]
 
 def browser_attack(known_prefix: str, alphabet: str, max_length: int) -> dict:
     body = json.dumps({
-        "variant": "browser",
+        "scenario": "browser",
         "config": {
             "known_prefix": known_prefix,
             "alphabet": alphabet,

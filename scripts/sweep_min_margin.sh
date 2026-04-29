@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# Sweep min_margin (μ) across {variant} x {scenario}:
-#   - variants:  direct, browser, ansible           (one per benchmark run)
-#   - scenarios: baseline, full-sweep, adaptive-sweep,
-#                candidate-elimination, all-opts
+# Sweep min_margin (μ) across {scenario} x {optimization}:
+#   - scenarios:    direct, browser, ansible          (one per benchmark run)
+#   - optimizations: NO, FS, AS, CE, FSCE, ASCE       (paper Table 2 labels)
 #   - min_margin: start at 8, step +8, stop on first 100%-success run,
 #                 give up after 128.
 #
 # Outputs land at:
-#   results/{baseline,sweep,adaptive,elim,full}/benchmark_{results,summary}_{variant}_mmN.{json,csv}
+#   results/{NO,FS,AS,CE,FSCE,ASCE}/benchmark_{results,summary}_{scenario}_mmN.{json,csv}
 #
 # Knobs (env vars):
 #   STACKS           (default 20)   parallel docker-compose projects per run
@@ -28,10 +27,9 @@
 #                                   Absorbs transient noise before bumping mm.
 #
 # Notes:
-#   - browser is skipped for baseline + candidate-elimination (these use
-#     fixed_single alignment and we have no fixed_al target for browser).
-#   - browser still runs for full-sweep + adaptive-sweep + all-opts (no
-#     --fixed-al needed).
+#   - browser is skipped for the fixed_single optimizations (NO and CE) -- we
+#     have no fixed_al target for browser.
+#   - browser still runs for FS, AS, FSCE, and ASCE (no --fixed-al needed).
 
 set -uo pipefail
 
@@ -62,42 +60,34 @@ MM_MAX="${MM_MAX:-128}"
 EARLY_EXIT="${EARLY_EXIT:-1}"
 MAX_RETRIES="${MAX_RETRIES:-2}"
 
-declare -A PRESET=(
-    [baseline]=baseline
-    [sweep]=full-sweep
-    [adaptive]=adaptive-sweep
-    [elim]=candidate-elimination
-    [full]=all-opts
-)
-SCENARIO_ORDER=(baseline sweep adaptive elim full)
-VARIANTS=(direct browser ansible)
+OPTIMIZATIONS=(NO FS AS CE FSCE ASCE)
+SCENARIOS=(direct browser ansible)
 
-for scenario_key in "${SCENARIO_ORDER[@]}"; do
-    preset="${PRESET[$scenario_key]}"
-    out_dir="results/$scenario_key"
+for optimization in "${OPTIMIZATIONS[@]}"; do
+    out_dir="results/$optimization"
     mkdir -p "$out_dir"
 
     needs_fixed_al=0
-    if [[ "$preset" == "baseline" || "$preset" == "candidate-elimination" ]]; then
+    if [[ "$optimization" == "NO" || "$optimization" == "CE" ]]; then
         needs_fixed_al=1
     fi
 
-    for variant in "${VARIANTS[@]}"; do
-        if [ "$needs_fixed_al" -eq 1 ] && [ "$variant" == "browser" ]; then
-            echo "--- skipping scenario=$scenario_key variant=browser (no fixed-al target) ---"
+    for scenario in "${SCENARIOS[@]}"; do
+        if [ "$needs_fixed_al" -eq 1 ] && [ "$scenario" == "browser" ]; then
+            echo "--- skipping optimization=$optimization scenario=browser (no fixed-al target) ---"
             continue
         fi
 
         extra_args=()
         if [ "$needs_fixed_al" -eq 1 ]; then
-            case "$variant" in
+            case "$scenario" in
                 direct)  extra_args+=(--fixed-al "$FIXED_AL_DIRECT")  ;;
                 ansible) extra_args+=(--fixed-al "$FIXED_AL_ANSIBLE") ;;
             esac
         fi
 
         echo "============================================================"
-        echo "  scenario=$scenario_key ($preset)  variant=$variant"
+        echo "  optimization=$optimization  scenario=$scenario"
         if [ "${#extra_args[@]}" -gt 0 ]; then
             echo "  extra args: ${extra_args[*]}"
         fi
@@ -106,9 +96,9 @@ for scenario_key in "${SCENARIO_ORDER[@]}"; do
         succeeded=0
         mm=$MM_START
         while [ "$mm" -le "$MM_MAX" ]; do
-            results_json="$out_dir/benchmark_results_${variant}_mm${mm}.json"
-            summary_csv="$out_dir/benchmark_summary_${variant}_mm${mm}.csv"
-            echo ">>> $scenario_key/$variant min_margin=$mm  -> $results_json"
+            results_json="$out_dir/benchmark_results_${scenario}_mm${mm}.json"
+            summary_csv="$out_dir/benchmark_summary_${scenario}_mm${mm}.csv"
+            echo ">>> $optimization/$scenario min_margin=$mm  -> $results_json"
 
             ee_args=()
             if [ "$EARLY_EXIT" = "1" ]; then
@@ -117,8 +107,8 @@ for scenario_key in "${SCENARIO_ORDER[@]}"; do
             python3 -u scripts/benchmark.py \
                 --stacks "$STACKS" \
                 --trials "$TRIALS" \
-                --variants "$variant" \
-                --scenario "$preset" \
+                --scenarios "$scenario" \
+                --optimization "$optimization" \
                 --min-margin "$mm" \
                 --max-retries "$MAX_RETRIES" \
                 --output "$results_json" \
@@ -129,22 +119,22 @@ for scenario_key in "${SCENARIO_ORDER[@]}"; do
             rc=${PIPESTATUS[0]}
             case "$rc" in
                 0)
-                    echo "### $scenario_key/$variant mm=$mm: 100% success -- stop"
+                    echo "### $optimization/$scenario mm=$mm: 100% success -- stop"
                     succeeded=1
                     break
                     ;;
                 1)
-                    echo "### $scenario_key/$variant mm=$mm: not yet 100% -- increasing"
+                    echo "### $optimization/$scenario mm=$mm: not yet 100% -- increasing"
                     mm=$((mm + MM_STEP))
                     ;;
                 2)
-                    echo "### $scenario_key/$variant mm=$mm: TECHNICAL FAILURE" \
+                    echo "### $optimization/$scenario mm=$mm: TECHNICAL FAILURE" \
                          "(infrastructure error, not an algorithmic miss)." \
                          "Aborting entire sweep -- fix the underlying issue and re-run."
                     exit 2
                     ;;
                 *)
-                    echo "### $scenario_key/$variant mm=$mm: benchmark.py" \
+                    echo "### $optimization/$scenario mm=$mm: benchmark.py" \
                          "exited with unexpected code $rc. Aborting sweep."
                     exit "$rc"
                     ;;
@@ -152,7 +142,7 @@ for scenario_key in "${SCENARIO_ORDER[@]}"; do
         done
 
         if [ "$succeeded" -eq 0 ]; then
-            echo "### $scenario_key/$variant: did not reach 100% by mm=$MM_MAX"
+            echo "### $optimization/$scenario: did not reach 100% by mm=$MM_MAX"
         fi
     done
 done

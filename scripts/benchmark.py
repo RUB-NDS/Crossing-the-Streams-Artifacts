@@ -1,4 +1,4 @@
-"""Benchmark the three attack variants (direct / browser / ansible).
+"""Benchmark the three attack scenarios (direct / browser / ansible).
 
 Parallelises N independent docker-compose projects. Each stack is fully
 isolated: its own bridge network, its own containers, its own scapy
@@ -45,8 +45,15 @@ ANSIBLE_PHASE1_TERMINATOR = "\x00"
 ANSIBLE_PHASE2_TERMINATOR = "\n"
 
 
-SCENARIO_PRESETS: dict[str, dict] = {
-    "baseline": {
+# Preset keys match the optimization labels used in the paper's Table 2:
+#   NO   = no further optimization (fixed_single alignment)
+#   FS   = full alignment sweep
+#   AS   = adaptive alignment sweep
+#   CE   = candidate elimination (fixed_single alignment)
+#   FSCE = full alignment sweep + candidate elimination
+#   ASCE = adaptive alignment sweep + candidate elimination
+OPTIMIZATION_PRESETS: dict[str, dict] = {
+    "NO": {
         "alignment_mode": "fixed_single",
         "candidate_elimination": False,
         "constant_prefix_trim": True,
@@ -55,7 +62,7 @@ SCENARIO_PRESETS: dict[str, dict] = {
         "alignment_hint_carryover": False,
         # alignment_lengths filled in from --fixed-al N
     },
-    "full-sweep": {
+    "FS": {
         "alignment_mode": "full_sweep",
         "candidate_elimination": False,
         "constant_prefix_trim": True,
@@ -63,7 +70,7 @@ SCENARIO_PRESETS: dict[str, dict] = {
         "stall_detection": False,
         "alignment_hint_carryover": False,
     },
-    "adaptive-sweep": {
+    "AS": {
         "alignment_mode": "full_sweep",
         "candidate_elimination": False,
         "constant_prefix_trim": True,
@@ -71,7 +78,7 @@ SCENARIO_PRESETS: dict[str, dict] = {
         "stall_detection": True,
         "alignment_hint_carryover": True,
     },
-    "candidate-elimination": {
+    "CE": {
         "alignment_mode": "fixed_single",
         "candidate_elimination": True,
         "constant_prefix_trim": True,
@@ -80,7 +87,15 @@ SCENARIO_PRESETS: dict[str, dict] = {
         "alignment_hint_carryover": False,
         # alignment_lengths filled in from --fixed-al N
     },
-    "all-opts": {
+    "FSCE": {
+        "alignment_mode": "full_sweep",
+        "candidate_elimination": True,
+        "constant_prefix_trim": True,
+        "adaptive_alignment": False,
+        "stall_detection": False,
+        "alignment_hint_carryover": False,
+    },
+    "ASCE": {
         "alignment_mode": "full_sweep",
         "candidate_elimination": True,
         "constant_prefix_trim": True,
@@ -91,19 +106,19 @@ SCENARIO_PRESETS: dict[str, dict] = {
 }
 
 
-def _build_config_override(scenario: str, fixed_al: int | None,
+def _build_config_override(optimization: str, fixed_al: int | None,
                             label_suffix: str) -> dict:
-    if scenario not in SCENARIO_PRESETS:
-        raise ValueError(f"unknown scenario {scenario!r}")
-    cfg = dict(SCENARIO_PRESETS[scenario])
+    if optimization not in OPTIMIZATION_PRESETS:
+        raise ValueError(f"unknown optimization {optimization!r}")
+    cfg = dict(OPTIMIZATION_PRESETS[optimization])
     if cfg.get("alignment_mode") == "fixed_single":
         if fixed_al is None:
             raise ValueError(
-                f"--fixed-al N is required with --scenario {scenario} "
+                f"--fixed-al N is required with --optimization {optimization} "
                 "(fixed_single alignment mode needs a pinned length)"
             )
         cfg["alignment_lengths"] = [int(fixed_al)]
-    cfg["label"] = f"{scenario}{label_suffix}"
+    cfg["label"] = f"{optimization}{label_suffix}"
     return cfg
 
 
@@ -204,7 +219,7 @@ def wait_ready(
 
 def _http_run_attack(
     attacker_base: str,
-    variant: str,
+    scenario: str,
     config_override: dict,
     known_prefix: str,
     alphabet: str,
@@ -218,7 +233,7 @@ def _http_run_attack(
     body_cfg["max_length"] = max_length
     if terminator is not None:
         body_cfg["terminator"] = terminator
-    body: dict[str, Any] = {"variant": variant, "config": body_cfg}
+    body: dict[str, Any] = {"scenario": scenario, "config": body_cfg}
     if expected is not None:
         body["expected"] = expected
     return http(
@@ -230,7 +245,7 @@ def _http_run_attack(
 
 def _run_two_phase(
     attacker_base: str,
-    variant: str,
+    scenario: str,
     base_config: dict,
     set_secret_url: str,
     password: str,
@@ -252,7 +267,7 @@ def _run_two_phase(
     time.sleep(1.0)
 
     r1 = _http_run_attack(
-        attacker_base, variant, base_config,
+        attacker_base, scenario, base_config,
         phase1_prefix, phase1_alphabet, phase1_max, phase1_terminator,
         expected=expected_phase1,
     )
@@ -275,7 +290,7 @@ def _run_two_phase(
         }
 
     r2 = _http_run_attack(
-        attacker_base, variant, base_config,
+        attacker_base, scenario, base_config,
         phase2_prefix_from_phase1(phase1_recovered),
         phase2_alphabet,
         phase2_max_fn(phase1_recovered),
@@ -298,8 +313,8 @@ def _run_two_phase(
     }
 
 
-def run_variant(
-    variant: str,
+def run_scenario(
+    scenario: str,
     base_config: dict,
     attacker_base: str,
     client_base: str,
@@ -308,10 +323,10 @@ def run_variant(
     early_exit: bool = False,
 ) -> dict:
     if early_exit:
-        if variant == "direct" or variant == "browser":
+        if scenario == "direct" or scenario == "browser":
             ep1 = str(len(password)) + "\r"
             ep2 = password + "\r"
-        elif variant == "ansible":
+        elif scenario == "ansible":
             ep1 = chr(len(password + 1)) + "\x00"
             ep2 = password + "\n"
         else:
@@ -319,7 +334,7 @@ def run_variant(
     else:
         ep1 = ep2 = None
 
-    if variant == "direct":
+    if scenario == "direct":
         return _run_two_phase(
             attacker_base, "direct", base_config,
             set_secret_url=f"{client_base}/set_secret",
@@ -336,7 +351,7 @@ def run_variant(
             expected_phase1=ep1,
             expected_phase2=ep2,
         )
-    if variant == "browser":
+    if scenario == "browser":
         return _run_two_phase(
             attacker_base, "browser", base_config,
             set_secret_url=f"{client_base}/set_secret",
@@ -353,7 +368,7 @@ def run_variant(
             expected_phase1=ep1,
             expected_phase2=ep2,
         )
-    if variant == "ansible":
+    if scenario == "ansible":
         return _run_two_phase(
             attacker_base, "ansible", base_config,
             set_secret_url=f"{client_base}/set_sudo_secret",
@@ -370,7 +385,7 @@ def run_variant(
             expected_phase1=ep1,
             expected_phase2=ep2,
         )
-    raise ValueError(f"unknown variant {variant!r}")
+    raise ValueError(f"unknown scenario {scenario!r}")
 
 
 _PRINT_LOCK = threading.Lock()
@@ -392,7 +407,7 @@ def worker(
     project_width: int,
     trial_indices: list[int],
     passwords: list[str],
-    variants: list[str],
+    scenarios: list[str],
     pw_alphabet: str,
     config_override: dict,
     early_exit: bool,
@@ -411,7 +426,7 @@ def worker(
         client_base = f"http://{client_ip}:8000"
         with results_lock:
             attacker_bases.append(attacker_base)
-        need_browser = "browser" in variants
+        need_browser = "browser" in scenarios
         _tprint(f"{tag} waiting for readiness at {attacker_base} / {client_base}"
                 f" (browser={'yes' if need_browser else 'no'})")
         wait_ready(attacker_base, client_base, need_browser=need_browser)
@@ -425,7 +440,7 @@ def worker(
         if early_exit and stop_event.is_set():
             return
         password = passwords[trial_idx]
-        for variant in variants:
+        for scenario in scenarios:
             if early_exit and stop_event.is_set():
                 return
             t0 = time.time()
@@ -439,10 +454,10 @@ def worker(
                     break
                 attempts_used = attempt
                 try:
-                    result = run_variant(variant, config_override,
-                                         attacker_base, client_base,
-                                         password, pw_alphabet,
-                                         early_exit=early_exit)
+                    result = run_scenario(scenario, config_override,
+                                          attacker_base, client_base,
+                                          password, pw_alphabet,
+                                          early_exit=early_exit)
                     ok = result["recovered"] == password
                     if ok:
                         status = "PASS"
@@ -467,15 +482,15 @@ def worker(
                     ok = False
                     status = f"ERROR: {exc}"
                 if attempt < max_attempts:
-                    _tprint(f"{tag} trial={trial_idx:3d} variant={variant:7s} "
+                    _tprint(f"{tag} trial={trial_idx:3d} scenario={scenario:7s} "
                             f"attempt {attempt}/{max_attempts} {status}; retrying")
             wall = time.time() - t0
             row = {
                 "stack": stack_idx,
                 "project": project,
                 "trial": trial_idx,
-                "variant": variant,
-                "scenario": config_override.get("label", ""),
+                "scenario": scenario,
+                "optimization": config_override.get("label", ""),
                 "password": password,
                 "recovered": result["recovered"],
                 "ok": ok,
@@ -494,7 +509,7 @@ def worker(
             with results_lock:
                 results.append(row)
             attempt_tag = f" (after {attempts_used}/{max_attempts} attempts)" if attempts_used > 1 else ""
-            _tprint(f"{tag} trial={trial_idx:3d} variant={variant:7s} "
+            _tprint(f"{tag} trial={trial_idx:3d} scenario={scenario:7s} "
                     f"guesses={result['total_guesses']:>7} wall={wall:6.1f}s  {status}{attempt_tag}")
 
             if early_exit and not ok:
@@ -510,11 +525,11 @@ def worker(
                 return
 
 
-def summarise(results: list[dict], variants: list[str]) -> dict:
+def summarise(results: list[dict], scenarios: list[str]) -> dict:
     summary: dict[str, dict] = {}
-    for v in variants:
-        vr = [r for r in results if r["variant"] == v]
-        passed = [r for r in vr if r["ok"]]
+    for s in scenarios:
+        sr = [r for r in results if r["scenario"] == s]
+        passed = [r for r in sr if r["ok"]]
         per_attack = [r["total_guesses"] for r in passed]
 
         per_position_guesses: list[int] = []
@@ -547,10 +562,10 @@ def summarise(results: list[dict], variants: list[str]) -> dict:
                     fork_triggered_positions += 1
                     fork_overhead_guesses += fi.get("losers_guesses", 0)
 
-        summary[v] = {
-            "trials_total": len(vr),
+        summary[s] = {
+            "trials_total": len(sr),
             "trials_passed": len(passed),
-            "trials_failed": len(vr) - len(passed),
+            "trials_failed": len(sr) - len(passed),
             "per_attack": stats(per_attack),
             "per_position": stats(per_position_guesses),
             "fork_triggered_positions": fork_triggered_positions,
@@ -565,21 +580,21 @@ def print_summary(summary: dict) -> None:
     print("SUMMARY  (per-attack | per-position)")
     print("=" * 96)
     header = (
-        f"{'variant':<10} {'passed':>7} "
+        f"{'scenario':<10} {'passed':>7} "
         f"{'a.min':>8} {'a.max':>8} {'a.avg':>10} {'a.total':>12} | "
         f"{'p.min':>6} {'p.max':>6} {'p.avg':>8} {'p.count':>7}"
     )
     print(header)
     print("-" * len(header))
-    for v, s in summary.items():
-        pa = s["per_attack"]
-        pp = s["per_position"]
+    for s, summ in summary.items():
+        pa = summ["per_attack"]
+        pp = summ["per_position"]
 
         def fmt(x, fmt_spec=""):
             return "-" if x is None else format(x, fmt_spec)
 
         print(
-            f"{v:<10} {s['trials_passed']:>7} "
+            f"{s:<10} {summ['trials_passed']:>7} "
             f"{fmt(pa['min']):>8} {fmt(pa['max']):>8} "
             f"{fmt(pa['avg'], '.1f'):>10} {pa['total']:>12} | "
             f"{fmt(pp['min']):>6} {fmt(pp['max']):>6} "
@@ -592,14 +607,14 @@ def main() -> int:
     ap.add_argument("--stacks", type=int, default=4,
                     help="number of parallel docker-compose projects")
     ap.add_argument("--trials", type=int, default=100,
-                    help="total number of passwords to attack per variant")
+                    help="total number of passwords to attack per scenario")
     ap.add_argument("--password-length", type=int, default=8,
                     help="password length (excluding terminator)")
     ap.add_argument("--seed", type=int, default=4253,
                     help="RNG seed for password generation (reproducible)")
     ap.add_argument("--alphabet", default=string.ascii_lowercase,
                     help="password alphabet (default: lowercase ASCII)")
-    ap.add_argument("--variants", default="direct,browser,ansible",
+    ap.add_argument("--scenarios", default="direct,browser,ansible",
                     help="comma-separated subset of {direct,browser,ansible}")
     ap.add_argument("--prefix", default="bench",
                     help="compose-project-name prefix (one per stack)")
@@ -611,20 +626,22 @@ def main() -> int:
                     help="do not tear down stacks after benchmark completes")
     ap.add_argument("--output", default="benchmark_results.json",
                     help="path for detailed JSON output")
-    ap.add_argument("--scenario", default="all-opts",
-                    choices=list(SCENARIO_PRESETS.keys()),
-                    help="named optimization preset")
+    ap.add_argument("--optimization", default="ASCE",
+                    choices=list(OPTIMIZATION_PRESETS.keys()),
+                    help="named optimization preset (paper Table 2 labels: "
+                         "NO, FS, AS, CE, FSCE, ASCE)")
     ap.add_argument("--fixed-al", type=int, default=None,
-                    help="required for fixed_single scenarios "
-                         "(baseline, candidate-elimination): "
+                    help="required for fixed_single optimizations (NO, CE): "
                          "single pinned alignment length")
     ap.add_argument("--config", default=None,
-                    help="path to raw JSON config override; if set, overrides --scenario")
+                    help="path to raw JSON config override; "
+                         "if set, overrides --optimization")
     ap.add_argument("--min-margin", type=int, default=None,
-                    help="override min_margin on top of the selected scenario/config "
-                         "(e.g. --min-margin 32); appended to config label as -mmN")
+                    help="override min_margin on top of the selected "
+                         "optimization/config (e.g. --min-margin 32); "
+                         "appended to the config label as -mmN")
     ap.add_argument("--csv-summary", default="benchmark_summary.csv",
-                    help="path for the one-row-per-variant CSV summary")
+                    help="path for the one-row-per-scenario CSV summary")
     ap.add_argument("--early-exit", action="store_true",
                     help="abort the run on the first wrong commit; populates "
                          "the engine's `expected` parameter from the known "
@@ -638,10 +655,10 @@ def main() -> int:
                          "noise before bumping min_margin.")
     args = ap.parse_args()
 
-    variants = [v.strip() for v in args.variants.split(",") if v.strip()]
-    for v in variants:
-        if v not in ("direct", "browser", "ansible"):
-            print(f"!! unknown variant {v!r}", file=sys.stderr)
+    scenarios = [s.strip() for s in args.scenarios.split(",") if s.strip()]
+    for s in scenarios:
+        if s not in ("direct", "browser", "ansible"):
+            print(f"!! unknown scenario {s!r}", file=sys.stderr)
             return 2
 
     if args.config:
@@ -651,10 +668,10 @@ def main() -> int:
             config_override["label"] = os.path.basename(args.config)
     else:
         uses_fixed_single = (
-            SCENARIO_PRESETS[args.scenario].get("alignment_mode") == "fixed_single"
+            OPTIMIZATION_PRESETS[args.optimization].get("alignment_mode") == "fixed_single"
         )
         config_override = _build_config_override(
-            args.scenario, args.fixed_al,
+            args.optimization, args.fixed_al,
             label_suffix=(f"-al{args.fixed_al}" if uses_fixed_single else ""),
         )
 
@@ -680,9 +697,9 @@ def main() -> int:
     print(f"  trials        : {args.trials}")
     print(f"  pw length     : {args.password_length}")
     print(f"  alphabet size : {len(args.alphabet)}")
-    print(f"  variants      : {variants}")
+    print(f"  scenarios     : {scenarios}")
     print(f"  seed          : {args.seed}")
-    print(f"  scenario      : {args.scenario}")
+    print(f"  optimization  : {args.optimization}")
     print(f"  config label  : {config_override['label']}")
     if args.min_margin is not None:
         print(f"  min_margin    : {args.min_margin} (override)")
@@ -740,7 +757,7 @@ def main() -> int:
             t = threading.Thread(
                 target=worker,
                 args=(i, p, project_width,
-                      assignments[i], passwords, variants,
+                      assignments[i], passwords, scenarios,
                       args.alphabet, config_override, args.early_exit,
                       args.max_retries,
                       results, results_lock, failures,
@@ -764,7 +781,7 @@ def main() -> int:
             for f in failures:
                 print(f"  {f}")
 
-        summary = summarise(results, variants)
+        summary = summarise(results, scenarios)
         print_summary(summary)
 
         all_passed = all(s["trials_failed"] == 0 for s in summary.values())
@@ -791,9 +808,9 @@ def main() -> int:
                     "trials": args.trials,
                     "password_length": args.password_length,
                     "alphabet": args.alphabet,
-                    "variants": variants,
+                    "scenarios": scenarios,
                     "seed": args.seed,
-                    "scenario": args.scenario,
+                    "optimization": args.optimization,
                     "config_label": config_override["label"],
                     "early_exit": args.early_exit,
                     "max_retries": args.max_retries,
@@ -810,25 +827,25 @@ def main() -> int:
         with open(args.csv_summary, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow([
-                "variant", "scenario", "trials_passed",
+                "scenario", "optimization", "trials_passed",
                 "per_attack_min", "per_attack_max", "per_attack_avg", "per_attack_total",
                 "per_position_count",
                 "per_position_min", "per_position_max", "per_position_avg",
                 "fork_triggered_positions", "fork_overhead_guesses",
                 "early_exit_triggered",
             ])
-            for v, s in summary.items():
-                pa = s["per_attack"]
-                pp = s["per_position"]
+            for s, summ in summary.items():
+                pa = summ["per_attack"]
+                pp = summ["per_position"]
                 w.writerow([
-                    v, config_override["label"], s["trials_passed"],
+                    s, config_override["label"], summ["trials_passed"],
                     pa["min"], pa["max"],
                     f"{pa['avg']:.1f}" if pa["avg"] is not None else "",
                     pa["total"],
                     pp["count"],
                     pp["min"], pp["max"],
                     f"{pp['avg']:.1f}" if pp["avg"] is not None else "",
-                    s["fork_triggered_positions"], s["fork_overhead_guesses"],
+                    summ["fork_triggered_positions"], summ["fork_overhead_guesses"],
                     "true" if early_exit_triggered else "false",
                 ])
         print(f"CSV summary -> {args.csv_summary}")
