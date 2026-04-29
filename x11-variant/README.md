@@ -100,31 +100,40 @@ the signal is below the noise floor.
 - `/e2e_check` builds a valid X11 connection-setup (verified by unit
   tests against byte-exact layout).
 
-**Cookie recovery: not yet succeeding** (one passing trial, the spec's
-definition of done, has not been demonstrated). End-to-end runs surface
-two issues the original design did not anticipate:
+**Cookie recovery: blocked by an OpenSSH-protocol-level rate limit on
+rejected X11 connections.** The spec's "one passing trial" definition of
+done has not been demonstrated, and end-to-end diagnostic runs revealed
+why: a single SSH session admits effectively *one* probe of attacker-
+controlled bytes through the X11 forward, after which subsequent probes
+are clipped to channel-setup-and-teardown overhead only.
 
-1. **`tx_bytes`-granularity signal is too coarse for single-byte
-   compression deltas at this probe size.** The total egress per
-   measurement is dominated by ~400 bytes of fixed SSH/TCP framing
-   overhead (3 SSH packets × {16-byte ChaCha20-Poly1305 MAC, 8-byte
-   alignment padding, ~20 bytes of TCP/IP header} per packet). A
-   single-byte CRIME-style match savings (~1 byte uncompressed,
-   typically <8 bytes encrypted after alignment) is below the noise
-   floor.
-2. **The X11-forward channel only fully transmits the *first* probe
-   per SSH session.** The SSH client's `x11_open_helper` rejects each
-   bad-cookie connection-setup, and after the first rejection,
-   subsequent x11 channels appear to forward only ~80 bytes of payload
-   regardless of probe size. A 10 KiB random probe shows in `tx_bytes`
-   only on the first measurement; subsequent measurements drop to
-   ~400-490 bytes.
+Empirical evidence:
+- Probe of 200 bytes of *highly compressible* data (`MIT-MAGIC-COOKIE-1\\x00\\x00`
+  repeated 10 times — would compress to ~25 bytes if the LZ77 window
+  contained any of it) and 200 bytes of *incompressible* random data
+  produce identical `tx_bytes` deltas of 408 in the steady state.
+- A 10 KiB random probe shows ~10720 bytes egress on the *first*
+  measurement, then drops to ~400-490 bytes on every subsequent
+  measurement, regardless of the cooldown between them.
+- A direct probe with the *known-correct* full 16-byte cookie placed
+  immediately after the anchor produces no measurable size delta vs.
+  the same probe with all-zero data — confirming the issue is not in
+  the engine's ranking algorithm.
 
-A direct compression diagnostic (probing with the *known-correct* full
-16-byte cookie vs. all-zero bytes after the anchor) shows no
-distinguishable size delta in the steady state — confirming the issue is
-not in the engine's ranking algorithm but in the measurement /
-forwarding pipeline.
+The verbose ssh client log is explicit about what's happening:
+`Initial X11 packet contains bad byte order byte: 0x60 / X11 connection
+rejected because of wrong authentication / channel_force_close: channel
+N: forcibly closing` — the client validates the connection-setup
+immediately on receiving the first CHANNEL_DATA bytes, and after the
+attacker's bad-cookie probe the channel is torn down. OpenSSH's client
+appears to stop forwarding meaningful payload after that, and the
+subsequent x11 channel-opens land mostly empty.
+
+This means the original CRIME-style design — accumulate evidence over
+many probes against one persistent SSH session — is incompatible with
+unmodified OpenSSH X11 forwarding, because each probe-attempt counts as
+a rejected connection and the protocol's auth-failure handling
+suppresses the per-probe payload.
 
 ## Out of scope (per spec, also not addressed by this build)
 
@@ -138,24 +147,28 @@ forwarding pipeline.
 
 ## What would unblock end-to-end recovery (not implemented)
 
-The two issues above suggest at least these directions for future work:
+The OpenSSH-side rate limit on rejected X11 channels is the dominant
+blocker; the `tx_bytes` granularity is a secondary concern that only
+matters once payload actually reaches the wire. Future work directions:
 
+- **Bypass the rejection clip.** Instead of using `ssh -X`'s X11 forward
+  as the injection vector, find a server→client channel where attacker
+  bytes get forwarded without per-message authentication. Candidates:
+  `ssh -R <port>:localhost:<port>` reverse forwards (if the victim has
+  one set up), or any persistent-connection forwarded service the
+  victim runs through their session. The X11 forward turned out to be
+  uniquely hostile because of the auth-on-first-byte semantics.
+- **Patch OpenSSH to drop the rejection-handling path.** Forking
+  OpenSSH and removing the auto-shutdown of X11 forwarding on
+  connection-setup auth failures would make the design work as the
+  spec assumed. Useful for academic demonstration, not realistic
+  deployment.
+- **Switch SSH implementation.** AsyncSSH and libssh handle X11
+  channels differently and may not have the same auto-suppress
+  behavior. (The earlier `x11-req` variant pivoted in this direction
+  for related reasons.)
 - **Finer-grained measurement.** Replace `tx_bytes` polling with
   per-packet inspection (`tcpdump`/scapy with `CAP_NET_RAW`) to expose
-  the size of *just* the SSH `CHANNEL_DATA` packet carrying the probe,
-  rather than the union of all server→client traffic during the settle
-  window. This breaks the attacker model (a co-tenant doesn't have
-  `CAP_NET_RAW` by default), but would prove the algorithm works.
-- **Larger compression delta per probe.** Make the candidate appear in
-  multiple back-reference contexts (e.g., probe = anchor + candidate +
-  filler + anchor + candidate, or longer matches that span more
-  alignment slots). A multi-byte savings differential would survive
-  alignment quantization.
-- **Keep the X11 channel forwarding alive across probes.** Construct
-  probes that look like valid X11 protocol after the connection-setup
-  (e.g., send the cookie exactly once at the start of each TCP
-  connection, then prepend `<short_bigreq><probe>` so the channel
-  doesn't auth-fail). This requires sending a known-valid cookie up
-  front, which contradicts the threat model (we don't know it yet),
-  unless we phase the recovery: first byte via "known-valid" cookie
-  candidates, etc.
+  the size of *just* the SSH `CHANNEL_DATA` packet carrying the probe.
+  This is necessary but not sufficient — it doesn't help if the probe
+  payload doesn't reach the channel in the first place.
