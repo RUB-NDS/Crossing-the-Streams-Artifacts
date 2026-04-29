@@ -116,10 +116,54 @@ async def _selfcheck() -> None:
     LOG.info("OK")
 
 
+from aiohttp import web
+
+HARNESS_PORT = 8000
+
+
+def _make_app() -> web.Application:
+    app = web.Application()
+    app["session"] = None
+
+    async def trial_start(request: web.Request) -> web.Response:
+        if app["session"] is not None:
+            return web.json_response(
+                {"error": "trial already in progress"}, status=409
+            )
+        sess = SSHSession()
+        await sess.open()
+        app["session"] = sess
+        return web.json_response({"ok": True})
+
+    async def trigger(request: web.Request) -> web.Response:
+        sess = app["session"]
+        if sess is None:
+            return web.json_response({"error": "no trial open"}, status=409)
+        await sess.trigger_xset()
+        return web.json_response({"ok": True})
+
+    async def trial_end(request: web.Request) -> web.Response:
+        sess = app["session"]
+        if sess is None:
+            return web.json_response({"ok": True})  # idempotent
+        await sess.close()
+        app["session"] = None
+        return web.json_response({"ok": True})
+
+    app.router.add_post("/trial/start", trial_start)
+    app.router.add_post("/trigger", trigger)
+    app.router.add_post("/trial/end", trial_end)
+    return app
+
+
+def _run_http() -> None:
+    logging.basicConfig(level=logging.INFO)
+    web.run_app(_make_app(), host="0.0.0.0", port=HARNESS_PORT, access_log=None)
+
+
 if __name__ == "__main__":
     import sys
     if "--selfcheck" in sys.argv:
         asyncio.run(_selfcheck())
     else:
-        # The HTTP service entry point is added in Task 11.
-        raise SystemExit("HTTP service not yet wired — run with --selfcheck")
+        _run_http()
