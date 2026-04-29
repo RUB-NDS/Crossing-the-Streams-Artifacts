@@ -312,7 +312,7 @@ def run_variant(
             ep1 = str(len(password)) + "\r"
             ep2 = password + "\r"
         elif variant == "ansible":
-            ep1 = chr(len(password)) + "\x00"
+            ep1 = chr(len(password + 1)) + "\x00"
             ep2 = password + "\n"
         else:
             ep1 = ep2 = None
