@@ -147,7 +147,7 @@ stdev over the `total_guesses` field of passing trials.
   `COPY`'d at image build time, not bind-mounted. Host scripts won't
   see changes until the relevant service is rebuilt.
 - **Do not casually change the load-bearing constants.**
-  `flush_bytes=33000` and `flush_pool="secrets_random"` (direct/browser),
+  `flush_bytes=32768` (32 KiB, the zlib LZ77 window size) and `flush_pool="secrets_random"` (direct/browser),
   `guess_prefill_bytes=16384` (browser only), alignment pool
   `0x80..0x8F`, the per-scenario `min_margin`, the adapter-specific
   ordering, and `outlier_threshold` are all explained in the paper

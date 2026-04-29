@@ -19,7 +19,7 @@ def _base_kwargs() -> dict:
         stall_detection=True,
         alignment_hint_carryover=True,
         outlier_threshold=0,
-        flush_bytes=33000,
+        flush_bytes=32768,
         flush_pool="secrets_random",
         measurement_min_segment_size=0,
     )

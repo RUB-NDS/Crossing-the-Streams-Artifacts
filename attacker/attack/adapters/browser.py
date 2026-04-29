@@ -96,7 +96,7 @@ class BrowserAdapter:
             stall_detection=False,
             alignment_hint_carryover=False,
             outlier_threshold=32,
-            flush_bytes=33000,
+            flush_bytes=32768,
             flush_pool="secrets_random",
             measurement_min_segment_size=100,
             candidate_fork_on_stall=False,

@@ -251,7 +251,8 @@ docker-compose stack. End-to-end correctness is verified by the
   build time, not bind-mounted: rebuild the relevant service after
   edits (`docker compose build attacker && docker compose up -d attacker`).
 - The alignment-data pool (`0x80..0x8F`), the per-scenario
-  `min_margin`, `flush_bytes=33000`, `guess_prefill_bytes=16384`
+  `min_margin`, `flush_bytes=32768` (the zlib LZ77 window size),
+  `guess_prefill_bytes=16384`
   (browser scenario only), and the adapter-specific ordering are
   load-bearing. They are documented in the paper (sections 4 and 5)
   and in the adapter docstrings.
