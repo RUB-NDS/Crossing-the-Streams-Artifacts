@@ -65,9 +65,19 @@ async def _run_attack_handler(request: web.Request) -> web.Response:
     return web.json_response({"recovered_cookie": recovered.hex()})
 
 
+async def _e2e_check_handler(request: web.Request) -> web.Response:
+    from attacker.verify import authenticate
+    body = await request.json()
+    target_port = int(body["target_port"])
+    cookie_hex = body["cookie_hex"]
+    ok = await authenticate(target_port, cookie_hex)
+    return web.json_response({"ok": ok})
+
+
 def _make_app() -> web.Application:
     app = web.Application()
     app.router.add_post("/run_attack", _run_attack_handler)
+    app.router.add_post("/e2e_check", _e2e_check_handler)
     return app
 
 
