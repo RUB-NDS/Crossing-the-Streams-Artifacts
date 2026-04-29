@@ -72,5 +72,66 @@ def _median(values):
     return statistics.median(values)
 
 
+class SyntheticOracle:
+    """Returns a small size when (prefix + candidate) is a prefix of the
+    target cookie at this byte position; a larger size otherwise."""
+
+    def __init__(self, cookie: bytes):
+        self.cookie = cookie
+
+    async def __call__(self, prefix: bytes, candidate: bytes, align_len: int) -> int:
+        n = len(prefix) + len(candidate)
+        if self.cookie[: n] == prefix + candidate:
+            return 100
+        return 120
+
+
+class FindNextByteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recovers_first_byte_of_cookie(self):
+        from attacker.engine import find_next_byte
+        cookie = bytes.fromhex("a1b2c3d4e5f60718293a4b5c6d7e8f90")
+        oracle = SyntheticOracle(cookie)
+        winner = await find_next_byte(
+            oracle=oracle,
+            prefix=b"",
+            byte_index=0,
+            min_margin=8,
+            min_agreement=5,
+            max_rounds=4,
+        )
+        self.assertEqual(winner, b"\xa1")
+
+    async def test_recovers_byte_after_correct_prefix(self):
+        from attacker.engine import find_next_byte
+        cookie = bytes.fromhex("a1b2c3d4e5f60718293a4b5c6d7e8f90")
+        oracle = SyntheticOracle(cookie)
+        winner = await find_next_byte(
+            oracle=oracle,
+            prefix=cookie[:5],
+            byte_index=5,
+            min_margin=8,
+            min_agreement=5,
+            max_rounds=4,
+        )
+        self.assertEqual(winner, bytes([cookie[5]]))
+
+    async def test_raises_when_oracle_signal_too_weak(self):
+        from attacker.engine import find_next_byte, RecoveryFailed
+
+        class FlatOracle:
+            async def __call__(self, prefix, candidate, align_len):
+                return 100  # all candidates indistinguishable
+
+        with self.assertRaises(RecoveryFailed):
+            await find_next_byte(
+                oracle=FlatOracle(),
+                prefix=b"",
+                byte_index=0,
+                min_margin=8,
+                min_agreement=5,
+                max_rounds=2,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
