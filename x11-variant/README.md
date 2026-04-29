@@ -100,40 +100,54 @@ the signal is below the noise floor.
 - `/e2e_check` builds a valid X11 connection-setup (verified by unit
   tests against byte-exact layout).
 
-**Cookie recovery: blocked by an OpenSSH-protocol-level rate limit on
-rejected X11 connections.** The spec's "one passing trial" definition of
-done has not been demonstrated, and end-to-end diagnostic runs revealed
-why: a single SSH session admits effectively *one* probe of attacker-
-controlled bytes through the X11 forward, after which subsequent probes
-are clipped to channel-setup-and-teardown overhead only.
+**Cookie recovery: signal demonstrably visible per-packet, but limited to
+the first 1-2 probes per SSH session by an OpenSSH-protocol-level
+rejection clip on bad-cookie X11 connections.** The spec's "one passing
+trial" definition of done has not been demonstrated, but two of the
+three layers of the attack are now empirically confirmed working.
 
-Empirical evidence:
-- Probe of 200 bytes of *highly compressible* data (`MIT-MAGIC-COOKIE-1\\x00\\x00`
-  repeated 10 times — would compress to ~25 bytes if the LZ77 window
-  contained any of it) and 200 bytes of *incompressible* random data
-  produce identical `tx_bytes` deltas of 408 in the steady state.
-- A 10 KiB random probe shows ~10720 bytes egress on the *first*
-  measurement, then drops to ~400-490 bytes on every subsequent
-  measurement, regardless of the cooldown between them.
-- A direct probe with the *known-correct* full 16-byte cookie placed
-  immediately after the anchor produces no measurable size delta vs.
-  the same probe with all-zero data — confirming the issue is not in
-  the engine's ranking algorithm.
+**Layer 1: signal in compressed bytes — confirmed.** With the
+scapy-pcap measurement (CAP_NET_RAW relaxation per spec §2.1), a
+pre-warmed SSH session immediately after `xset q` shows the expected
+compression delta on the first probe:
+```
+Probe 1 CORRECT (anchor + actual 16-byte cookie):
+  total=152 per_pkt=[44, 36, 36, 36]
+Probe 2 WRONG   (anchor + 16 random non-cookie bytes):
+  total=160 per_pkt=[36, 52, 36, 36]
+Probe 3+ either  (anchor + random or anchor + cookie):
+  total=144 per_pkt=[36, 36, 36, 36]   ← clipped, no probe content
+```
+The 8-16 byte differential between CORRECT and WRONG on the first 1-2
+probes is exactly the CRIME-style compression delta we expected. The
+prior `tx_bytes` measurement was simply too coarse to see it — switching
+to per-packet visibility resolves that layer.
 
-The verbose ssh client log is explicit about what's happening:
-`Initial X11 packet contains bad byte order byte: 0x60 / X11 connection
+**Layer 2: rejection clip — still open.** From probe 3 onward in any
+single session, sshd ships only ~16 bytes of compressed CHANNEL_DATA per
+packet, regardless of probe content. The verbose ssh client log shows
+`Initial X11 packet contains bad byte order byte / X11 connection
 rejected because of wrong authentication / channel_force_close: channel
-N: forcibly closing` — the client validates the connection-setup
-immediately on receiving the first CHANNEL_DATA bytes, and after the
-attacker's bad-cookie probe the channel is torn down. OpenSSH's client
-appears to stop forwarding meaningful payload after that, and the
-subsequent x11 channel-opens land mostly empty.
+N: forcibly closing` — the SSH client's `x11_open_helper` validates the
+first 12+ bytes of each probe's connection-setup, rejects on auth
+mismatch, and `channel_force_close` resets buffers and tears down the
+channel. After enough rejections the SSH client stops forwarding
+meaningful CHANNEL_DATA payload, even though the listener still accepts
+new TCP connections.
 
-This means the original CRIME-style design — accumulate evidence over
-many probes against one persistent SSH session — is incompatible with
-unmodified OpenSSH X11 forwarding, because each probe-attempt counts as
-a rejected connection and the protocol's auth-failure handling
-suppresses the per-probe payload.
+See `docs/openssh-trace.md` for the source-level walk through
+(`channels.c::x11_open_helper` at line 1373 → `channel_pre_x11_open` at
+1466 → `channel_force_close` at 1440).
+
+**Layer 3: full recovery — architecturally blocked by Layer 2.** The
+CRIME-style algorithm needs many measurements per (cookie, candidate,
+alignment) tuple to extract the byte. With only 1-2 useful probes per
+SSH session, and each fresh session generating a fresh fake cookie
+(OpenSSH's `arc4random_buf(sc->x11_fake_data, data_len)` in
+`channels.c::x11_request_forwarding_with_spoofing`), evidence cannot
+accumulate across sessions for any single cookie. So even though the
+per-probe signal is real, the attack architecture cannot converge on a
+specific cookie under unmodified OpenSSH semantics.
 
 ## Out of scope (per spec, also not addressed by this build)
 
