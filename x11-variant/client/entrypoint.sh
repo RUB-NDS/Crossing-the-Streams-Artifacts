@@ -14,8 +14,11 @@ for _ in $(seq 1 30); do
     fi
     sleep 0.1
 done
-xdpyinfo -display :0 | grep -q SECURITY \
-    || { echo "FATAL: SECURITY extension not present on Xvfb"; exit 1; }
+XDPY_INFO=$(xdpyinfo -display :0)
+if ! echo "$XDPY_INFO" | grep -q SECURITY; then
+    echo "FATAL: SECURITY extension not present on Xvfb"
+    exit 1
+fi
 
 # Provision the victim's SSH key from the shared volume.
 mkdir -p /home/victim/.ssh

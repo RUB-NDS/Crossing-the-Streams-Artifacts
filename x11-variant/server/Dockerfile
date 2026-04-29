@@ -13,7 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN useradd -m -s /bin/bash victim \
     && chmod 0700 /home/victim \
-    && useradd -m -s /bin/bash attacker
+    && useradd -m -s /bin/bash attacker \
+    && usermod -p '*' victim \
+    && usermod -p '*' attacker
 
 # Generate the per-build SSH key for victim and place public key in
 # authorized_keys. Private key gets exported into /srv/keys for the

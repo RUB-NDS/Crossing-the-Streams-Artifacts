@@ -1,0 +1,27 @@
+services:
+  server:
+    build: ./server
+    image: x11-fwd-server:dev
+    container_name: x11-fwd-server
+    hostname: server
+    networks: [x11net]
+    volumes:
+      - keys:/srv/keys
+
+  client:
+    build: ./client
+    image: x11-fwd-client:dev
+    container_name: x11-fwd-client
+    hostname: client
+    networks: [x11net]
+    volumes:
+      - keys:/srv/keys
+    depends_on:
+      - server
+
+networks:
+  x11net:
+    driver: bridge
+
+volumes:
+  keys:
