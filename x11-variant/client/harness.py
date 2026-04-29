@@ -52,6 +52,21 @@ class SSHSession:
             await self._send_line(f"xset q >/dev/null; echo {token}")
             await self._read_until(token)
 
+    async def flush_window(self, n_bytes: int = 40000) -> None:
+        """Push n_bytes of base64-encoded random data through the bash session,
+        which flows server->client through the SSH compression context. After
+        ~32 KiB of egress the LZ77 sliding window has fully cycled, evicting
+        any prior probe / cookie content so the next iteration starts clean.
+
+        Uses base64 so the output is ASCII-only and can not accidentally
+        produce the sentinel token bytes."""
+        async with self._io_lock:
+            token = self._next_token("FLUSH")
+            await self._send_line(
+                f"head -c {n_bytes} /dev/urandom | base64 -w0; echo; echo {token}"
+            )
+            await self._read_until(token)
+
     async def close(self) -> None:
         if self._proc is None:
             return
@@ -144,6 +159,13 @@ def _make_app() -> web.Application:
         await sess.trigger_xset()
         return web.json_response({"ok": True})
 
+    async def flush(request: web.Request) -> web.Response:
+        sess = app["session"]
+        if sess is None:
+            return web.json_response({"error": "no trial open"}, status=409)
+        await sess.flush_window()
+        return web.json_response({"ok": True})
+
     async def trial_end(request: web.Request) -> web.Response:
         sess = app["session"]
         if sess is None:
@@ -154,6 +176,7 @@ def _make_app() -> web.Application:
 
     app.router.add_post("/trial/start", trial_start)
     app.router.add_post("/trigger", trigger)
+    app.router.add_post("/flush", flush)
     app.router.add_post("/trial/end", trial_end)
     return app
 

