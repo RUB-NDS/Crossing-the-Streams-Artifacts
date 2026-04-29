@@ -6,8 +6,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         xauth \
         x11-xserver-utils \
         iproute2 \
+        tcpdump \
         python3 \
         python3-aiohttp \
+        python3-scapy \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

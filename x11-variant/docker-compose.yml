@@ -7,6 +7,9 @@ services:
     networks: [x11net]
     volumes:
       - keys:/srv/keys
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
 
   client:
     build: ./client

