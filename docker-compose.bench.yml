@@ -1,10 +1,10 @@
-# Benchmark override: lets N independent compose projects coexist on
-# one host by project-scoping every container_name and dropping the
-# hardcoded host-port mappings (the benchmark script dials each
-# project's attacker/client directly on their docker-bridge IPs).
+# Benchmark override: lets N independent compose projects coexist on one
+# host by project-scoping every container_name and dropping the hardcoded
+# host-port mappings (the benchmark script dials each project's attacker /
+# client directly on their docker-bridge IPs).
 #
-# Explicit `image:` tags make all projects share the same built image
-# so `docker compose build` only has to run once, not N times.
+# Explicit `image:` tags make all projects share the same built image so
+# `docker compose build` only has to run once, not N times.
 #
 # Usage:
 #   COMPOSE_PROJECT_NAME=bench-0 \
@@ -17,9 +17,9 @@ services:
     container_name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME required}-keygen
     image: ssh-compression-poc-bench/keygen:latest
     # Bench runs assume keys are pregenerated on the host. Gate keygen
-    # behind a profile that's never activated so it isn't built or
-    # started — saves one container per stack (×100 stacks adds up) and
-    # avoids the shared-./keys race when many stacks come up at once.
+    # behind a profile that's never activated so it isn't built or started
+    # -- saves one container per stack and avoids the shared-./keys race
+    # when many stacks come up at once.
     profiles: ["never"]
   redis:
     container_name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME required}-redis
@@ -27,8 +27,7 @@ services:
     container_name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME required}-server
     image: ssh-compression-poc-bench/server:latest
     # `required: false` lets Compose silently drop the dependency when
-    # keygen's profile is inactive, instead of failing with
-    # "service keygen is required by server but is disabled".
+    # keygen's profile is inactive, instead of failing.
     depends_on:
       keygen:
         condition: service_completed_successfully

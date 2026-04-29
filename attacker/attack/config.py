@@ -3,7 +3,7 @@
 The HTTP handler builds a final config by starting from an adapter's
 default_config() and calling overlay() with the caller-supplied override
 dict. Bytes fields (known_prefix, terminator, alphabet) arrive as strings
-over JSON and are decoded here, centralising the marshalling.
+over JSON and are decoded here.
 """
 
 from __future__ import annotations
@@ -55,7 +55,6 @@ class AttackConfig:
     label: str = ""
 
     def overlay(self, overrides: dict[str, Any]) -> "AttackConfig":
-        """Return a new config with `overrides` applied; bytes fields decoded."""
         converted: dict[str, Any] = {}
         for key, value in overrides.items():
             if value is None:

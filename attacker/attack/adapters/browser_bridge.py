@@ -1,7 +1,8 @@
-"""Async bridge between attack logic and a WebSocket-connected browser.
+"""Async bridge between the browser-injection adapter and the WebSocket
+control channel served by the attacker.
 
-Moved here from attacker/attack_beast.py as part of the unified-engine
-refactor.
+The victim's browser connects via WebSocket and executes fetch() commands
+on behalf of the attacker.
 """
 
 from __future__ import annotations
@@ -15,12 +16,6 @@ LOG = logging.getLogger("attack.browser_bridge")
 
 
 class BrowserBridge:
-    """Async bridge between the attack logic and the victim's browser.
-
-    The browser connects via WebSocket and executes fetch() commands
-    on behalf of the attacker.
-    """
-
     def __init__(self) -> None:
         self._ws: Any = None
         self._pending: dict[int, asyncio.Future] = {}

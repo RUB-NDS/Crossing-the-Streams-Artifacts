@@ -1,16 +1,12 @@
-"""Verify the BEAST attack variant and run the hunter2 test.
+"""End-to-end verification for the browser-injection variant (Section 5.2).
 
 Run from the host while the docker-compose stack is up:
 
-    python scripts/verify_beast.py
+    python scripts/verify_browser.py
 
-Checks:
-  1. HTTP control APIs are reachable
-  2. SSH connection up with zlib compression
-  3. Redis tunnel port forward active (0.0.0.0:6379)
-  4. Browser connected to attacker via WebSocket
-  5. Attacker can trigger Redis AUTH -> packets observed
-  6. Run the hunter2 two-phase BEAST attack
+Checks: HTTP control APIs reachable, SSH up with zlib compression, Redis
+tunnel active, browser connected via WebSocket, packets observed during
+Redis AUTH, and a two-phase recovery of "hunter2".
 """
 
 from __future__ import annotations
@@ -65,9 +61,9 @@ def fail(msg: str) -> "NoReturn":  # type: ignore[name-defined]
     sys.exit(1)
 
 
-def beast_attack(known_prefix: str, alphabet: str, max_length: int) -> dict:
+def browser_attack(known_prefix: str, alphabet: str, max_length: int) -> dict:
     body = json.dumps({
-        "variant": "beast",
+        "variant": "browser",
         "config": {
             "known_prefix": known_prefix,
             "alphabet": alphabet,
@@ -120,8 +116,7 @@ def main() -> int:
         fail("no TCP segments observed during Redis AUTH")
     print(f"  [ok] {log['count']} segments captured during AUTH")
 
-    step("5. BEAST attack: recover hunter2")
-    # Set secret to hunter2
+    step("5. Browser-injection attack: recover hunter2")
     http("POST", f"{CLIENT_BASE}/set_secret",
          body=json.dumps({"value": "hunter2"}).encode("utf-8"),
          content_type="application/json")
@@ -129,15 +124,13 @@ def main() -> int:
 
     t0 = time.time()
 
-    # Phase 1: recover password length
     print("  Phase 1: recovering password length...")
-    r1 = beast_attack(RESP_PREFIX, "0123456789", 4)
+    r1 = browser_attack(RESP_PREFIX, "0123456789", 4)
     pw_len = r1["recovered"]
     print(f"    length = {pw_len} ({r1['elapsed_seconds']:.1f}s)")
 
-    # Phase 2: recover password
     print("  Phase 2: recovering password...")
-    r2 = beast_attack(RESP_PREFIX + pw_len + "\r\n",
+    r2 = browser_attack(RESP_PREFIX + pw_len + "\r\n",
                        "abcdefghijklmnopqrstuvwxyz0123456789",
                        int(pw_len) + 4)
     password = r2["recovered"]

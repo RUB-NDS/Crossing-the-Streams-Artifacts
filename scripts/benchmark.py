@@ -1,20 +1,16 @@
-"""Benchmark the three attack variants (direct / BEAST / Ansible).
+"""Benchmark the three attack variants (direct / browser / ansible).
 
-Parallelises independent docker-compose projects.  Each stack is fully
+Parallelises N independent docker-compose projects. Each stack is fully
 isolated: its own bridge network, its own containers, its own scapy
-sniffer.  The benchmark script dials each stack's attacker and client
+sniffer. The benchmark script dials each stack's attacker and client
 directly on their docker-bridge IPs -- no host port mapping needed.
 
 Usage:
 
     python scripts/benchmark.py --stacks 4 --trials 100
 
-On a big machine:
-
-    python scripts/benchmark.py --stacks 32 --trials 100
-
 Reads attack guess counts from the ``total_guesses`` field that
-attacker/attack/engine.py now includes in every ``/run_attack`` response.
+attacker/attack/engine.py includes in every ``/run_attack`` response.
 Writes a detailed JSON dump (``benchmark_results.json``) alongside the
 console summary.
 """
@@ -49,10 +45,6 @@ ANSIBLE_PHASE1_TERMINATOR = "\x00"
 ANSIBLE_PHASE2_TERMINATOR = "\n"
 
 
-# ---------------------------------------------------------------------------
-# Scenario presets
-# ---------------------------------------------------------------------------
-
 SCENARIO_PRESETS: dict[str, dict] = {
     "baseline": {
         "alignment_mode": "fixed_single",
@@ -61,7 +53,7 @@ SCENARIO_PRESETS: dict[str, dict] = {
         "adaptive_alignment": False,
         "stall_detection": False,
         "alignment_hint_carryover": False,
-        # alignment_lengths filled in from --fixed-nl N
+        # alignment_lengths filled in from --fixed-al N
     },
     "full-sweep": {
         "alignment_mode": "full_sweep",
@@ -86,7 +78,7 @@ SCENARIO_PRESETS: dict[str, dict] = {
         "adaptive_alignment": False,
         "stall_detection": False,
         "alignment_hint_carryover": False,
-        # alignment_lengths filled in from --fixed-nl N
+        # alignment_lengths filled in from --fixed-al N
     },
     "all-opts": {
         "alignment_mode": "full_sweep",
@@ -99,28 +91,24 @@ SCENARIO_PRESETS: dict[str, dict] = {
 }
 
 
-def _build_config_override(scenario: str, fixed_nl: int | None,
+def _build_config_override(scenario: str, fixed_al: int | None,
                             label_suffix: str) -> dict:
     if scenario not in SCENARIO_PRESETS:
         raise ValueError(f"unknown scenario {scenario!r}")
     cfg = dict(SCENARIO_PRESETS[scenario])
     if cfg.get("alignment_mode") == "fixed_single":
-        if fixed_nl is None:
+        if fixed_al is None:
             raise ValueError(
-                f"--fixed-nl N is required with --scenario {scenario} "
+                f"--fixed-al N is required with --scenario {scenario} "
                 "(fixed_single alignment mode needs a pinned length)"
             )
-        cfg["alignment_lengths"] = [int(fixed_nl)]
+        cfg["alignment_lengths"] = [int(fixed_al)]
     cfg["label"] = f"{scenario}{label_suffix}"
     return cfg
 
 
-# ---------------------------------------------------------------------------
-# HTTP helper (blocking, stdlib only)
-# ---------------------------------------------------------------------------
-
 def _broadcast_cancel(attacker_bases: list[str]) -> None:
-    """POST /cancel to every attacker, best-effort. Errors are swallowed —
+    """POST /cancel to every attacker, best-effort. Errors are swallowed --
     a stack that's already wedged or torn down is fine to skip."""
     for base in attacker_bases:
         try:
@@ -133,8 +121,8 @@ def http(
     url: str,
     method: str = "GET",
     body: Any = None,
-    timeout: float = 86400.0,  # 24h — slow scenarios (BEAST + high min_margin
-                               # + adaptive sweep) can legitimately run multi-hour
+    timeout: float = 86400.0,  # 24h -- slow scenarios (browser + high
+                               # min_margin + adaptive sweep) can run multi-hour
 ) -> dict:
     data = None
     headers = {}
@@ -146,10 +134,6 @@ def http(
         raw = r.read()
     return json.loads(raw) if raw else {}
 
-
-# ---------------------------------------------------------------------------
-# Docker compose driver
-# ---------------------------------------------------------------------------
 
 def _compose(project: str, *args: str, capture: bool = False) -> subprocess.CompletedProcess:
     env = {**os.environ, "COMPOSE_PROJECT_NAME": project}
@@ -192,10 +176,6 @@ def inspect_ip(container: str) -> str:
     return ip
 
 
-# ---------------------------------------------------------------------------
-# Readiness polling
-# ---------------------------------------------------------------------------
-
 def wait_ready(
     attacker_base: str,
     client_base: str,
@@ -221,10 +201,6 @@ def wait_ready(
         time.sleep(2.0)
     raise RuntimeError(f"stack not ready after {timeout:.0f}s: {last}")
 
-
-# ---------------------------------------------------------------------------
-# Unified runner (replaces legacy per-variant functions and VARIANT_RUNNERS)
-# ---------------------------------------------------------------------------
 
 def _http_run_attack(
     attacker_base: str,
@@ -270,7 +246,6 @@ def _run_two_phase(
     expected_phase1: str | None = None,
     expected_phase2: str | None = None,
 ) -> dict:
-    # Reset secret via client's set-secret endpoint.
     http(set_secret_url, method="POST", body={"value": password})
     # Small settle so the client's "set secret" reaches the server
     # before the attack starts measuring.
@@ -333,7 +308,7 @@ def run_variant(
     early_exit: bool = False,
 ) -> dict:
     if early_exit:
-        if variant == "direct" or variant == "beast":
+        if variant == "direct" or variant == "browser":
             ep1 = str(len(password)) + "\r"
             ep2 = password + "\r"
         elif variant == "ansible":
@@ -361,9 +336,9 @@ def run_variant(
             expected_phase1=ep1,
             expected_phase2=ep2,
         )
-    if variant == "beast":
+    if variant == "browser":
         return _run_two_phase(
-            attacker_base, "beast", base_config,
+            attacker_base, "browser", base_config,
             set_secret_url=f"{client_base}/set_secret",
             password=password,
             phase1_prefix=RESP_PREFIX,
@@ -398,18 +373,14 @@ def run_variant(
     raise ValueError(f"unknown variant {variant!r}")
 
 
-# ---------------------------------------------------------------------------
-# Per-stack worker (one thread per stack, trials sequential within)
-# ---------------------------------------------------------------------------
-
 _PRINT_LOCK = threading.Lock()
 
 
 def _tprint(msg: str) -> None:
     """Thread-safe print: writes the line + newline as a single
-    sys.stdout.write so concurrent worker threads don't interleave
-    halfway through a line. Plain print() does write(s) then write('\\n')
-    as two calls, which can split under load."""
+    sys.stdout.write so concurrent worker threads don't interleave halfway
+    through a line. Plain print() does write(s) then write('\\n') as two
+    calls, which can split under load."""
     with _PRINT_LOCK:
         sys.stdout.write(msg + "\n")
         sys.stdout.flush()
@@ -432,9 +403,6 @@ def worker(
     stop_event: threading.Event,
     attacker_bases: list[str],
 ) -> None:
-    # Pad project name to a fixed width so single-digit and two-digit
-    # stack ids ("bench-0" vs "bench-10") still line up at the closing
-    # bracket and beyond.
     tag = f"[stack {stack_idx:02d} {project:<{project_width}}]"
     try:
         attacker_ip = inspect_ip(f"{project}-attacker")
@@ -443,7 +411,7 @@ def worker(
         client_base = f"http://{client_ip}:8000"
         with results_lock:
             attacker_bases.append(attacker_base)
-        need_browser = "beast" in variants
+        need_browser = "browser" in variants
         _tprint(f"{tag} waiting for readiness at {attacker_base} / {client_base}"
                 f" (browser={'yes' if need_browser else 'no'})")
         wait_ready(attacker_base, client_base, need_browser=need_browser)
@@ -468,7 +436,6 @@ def worker(
             status = ""
             for attempt in range(1, max_attempts + 1):
                 if early_exit and stop_event.is_set():
-                    # Sibling thread broadcast /cancel; abandon retries.
                     break
                 attempts_used = attempt
                 try:
@@ -481,7 +448,6 @@ def worker(
                         status = "PASS"
                         break
                     if result.get("abort_reason") == "cancelled":
-                        # External cancel from another stack — don't retry.
                         status = "CANCELLED"
                         break
                     status = f"FAIL(expected={password!r}, got={result['recovered']!r})"
@@ -544,10 +510,6 @@ def worker(
                 return
 
 
-# ---------------------------------------------------------------------------
-# Summary
-# ---------------------------------------------------------------------------
-
 def summarise(results: list[dict], variants: list[str]) -> dict:
     summary: dict[str, dict] = {}
     for v in variants:
@@ -555,7 +517,6 @@ def summarise(results: list[dict], variants: list[str]) -> dict:
         passed = [r for r in vr if r["ok"]]
         per_attack = [r["total_guesses"] for r in passed]
 
-        # Per-position: flatten both phase lists across all passed trials.
         per_position_guesses: list[int] = []
         for r in passed:
             for entry in (r.get("phase1_per_position") or []):
@@ -572,7 +533,6 @@ def summarise(results: list[dict], variants: list[str]) -> dict:
                 "total": sum(xs),
             }
 
-        # Fork metrics: count positions where fork triggered, sum losers' guesses
         fork_triggered_positions = 0
         fork_overhead_guesses = 0
         for r in passed:
@@ -627,10 +587,6 @@ def print_summary(summary: dict) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--stacks", type=int, default=4,
@@ -643,8 +599,8 @@ def main() -> int:
                     help="RNG seed for password generation (reproducible)")
     ap.add_argument("--alphabet", default=string.ascii_lowercase,
                     help="password alphabet (default: lowercase ASCII)")
-    ap.add_argument("--variants", default="direct,beast,ansible",
-                    help="comma-separated subset of {direct,beast,ansible}")
+    ap.add_argument("--variants", default="direct,browser,ansible",
+                    help="comma-separated subset of {direct,browser,ansible}")
     ap.add_argument("--prefix", default="bench",
                     help="compose-project-name prefix (one per stack)")
     ap.add_argument("--no-build", action="store_true",
@@ -658,7 +614,7 @@ def main() -> int:
     ap.add_argument("--scenario", default="all-opts",
                     choices=list(SCENARIO_PRESETS.keys()),
                     help="named optimization preset")
-    ap.add_argument("--fixed-nl", type=int, default=None,
+    ap.add_argument("--fixed-al", type=int, default=None,
                     help="required for fixed_single scenarios "
                          "(baseline, candidate-elimination): "
                          "single pinned alignment length")
@@ -684,7 +640,7 @@ def main() -> int:
 
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
     for v in variants:
-        if v not in ("direct", "beast", "ansible"):
+        if v not in ("direct", "browser", "ansible"):
             print(f"!! unknown variant {v!r}", file=sys.stderr)
             return 2
 
@@ -698,8 +654,8 @@ def main() -> int:
             SCENARIO_PRESETS[args.scenario].get("alignment_mode") == "fixed_single"
         )
         config_override = _build_config_override(
-            args.scenario, args.fixed_nl,
-            label_suffix=(f"-nl{args.fixed_nl}" if uses_fixed_single else ""),
+            args.scenario, args.fixed_al,
+            label_suffix=(f"-al{args.fixed_al}" if uses_fixed_single else ""),
         )
 
     if args.min_margin is not None:
@@ -713,7 +669,6 @@ def main() -> int:
     ]
     projects = [f"{args.prefix}-{i}" for i in range(args.stacks)]
 
-    # Round-robin distribution so every stack has near-equal load.
     assignments: list[list[int]] = [[] for _ in range(args.stacks)]
     for i in range(args.trials):
         assignments[i % args.stacks].append(i)
@@ -815,12 +770,12 @@ def main() -> int:
         all_passed = all(s["trials_failed"] == 0 for s in summary.values())
         success = all_passed and not failures and not early_exit_triggered
 
-        # Classify failures so the caller (e.g. sweep_min_margin.sh) can
-        # tell "algorithm wasn't strong enough at this min_margin"
-        # (FAIL/CANCELLED — bumping mm may help) from "infrastructure
-        # broke" (ERROR / setup failure — bumping mm won't help, abort).
-        # CANCELLED is a downstream consequence of *whatever* tripped
-        # early-exit first, so we look for ERROR explicitly to decide.
+        # Exit-code triage so the caller (e.g. sweep_min_margin.sh) can tell
+        # "algorithm wasn't strong enough at this min_margin" (FAIL/CANCELLED
+        # -- bumping mm may help) from "infrastructure broke" (ERROR / setup
+        # failure -- bumping mm won't help, abort). CANCELLED is a downstream
+        # consequence of *whatever* tripped early-exit first, so we look for
+        # ERROR explicitly.
         technical_errors = [
             r for r in results if str(r.get("status", "")).startswith("ERROR:")
         ]

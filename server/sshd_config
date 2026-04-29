@@ -2,27 +2,22 @@ Port 22
 AddressFamily inet
 ListenAddress 0.0.0.0
 
-# Force compression -- both zlib and zlib@openssh.com.
-# The client connects with -C so the negotiation picks zlib@openssh.com.
+# Force compression -- the client connects with -C so the negotiation picks
+# zlib@openssh.com.
 Compression yes
 
-# Host key (copied from /keys volume at container start)
 HostKey /etc/ssh/server_host_key
 
-# Authentication
 PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 AuthenticationMethods publickey
-# prohibit-password = allow root via pubkey only, never via password.
-# Used by the PoC's /set_sudo_secret helper so the client can remotely
-# change the victim's sudo password between attack runs.
+# Allow root via pubkey only. Used by /set_sudo_secret to remotely change
+# the victim's sudo password between attack runs.
 PermitRootLogin prohibit-password
 AllowUsers victim root
 
-# Port forwarding -- allow direct-tcpip (local forwarding from client)
 AllowTcpForwarding yes
 GatewayPorts no
 
-# Logging
 LogLevel INFO

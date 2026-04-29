@@ -3,24 +3,19 @@
 Three things happen here:
 
   1. A passive TCP forwarder relays bytes between the SSH client (which
-     dialled us on :2222) and the real SSH server on :22.  We do **not**
+     dialled us on :2222) and the real SSH server on :22. We do **not**
      terminate, decrypt, or alter SSH; the client pins the real server's
      host key so any attempt at active in-the-middle would be rejected.
 
   2. A scapy AsyncSniffer captures every TCP segment on ports 22 / 2222
-     and records (timestamp, direction, payload size, flags).  This is
-     the side-channel signal we need: even though the bytes are
-     encrypted, the SSH binary packet protocol's per-packet length is
-     directly observable in the TCP segment that carries it.
+     and records (timestamp, direction, payload size, flags). This is
+     the side-channel signal: even though the bytes are encrypted, the
+     SSH binary packet protocol's per-packet length is directly
+     observable in the TCP segment that carries it.
 
   3. An aiohttp HTTP control API on :9000 lets the verification driver
      query / clear the recorded packet log, trigger the client to send
      a Redis AUTH, and run the full attack.
-
-The attack injects payloads by opening TCP connections to the client's
-exposed Redis tunnel port.  Each connection creates a ``direct-tcpip``
-SSH channel that shares the c->s zlib compression context with the
-victim's Redis AUTH traffic.
 """
 
 import asyncio
@@ -37,10 +32,9 @@ from scapy.layers.inet import IP, TCP  # type: ignore
 
 from attacker.attack.adapters.browser_bridge import BrowserBridge
 
-# Unified engine.
 from attacker.attack.engine import run_attack as run_unified_attack
 from attacker.attack.adapters.direct import DirectAdapter
-from attacker.attack.adapters.beast import BeastAdapter
+from attacker.attack.adapters.browser import BrowserAdapter
 from attacker.attack.adapters.ansible import AnsibleAdapter
 
 LOG = logging.getLogger("attacker")
@@ -56,10 +50,6 @@ TUNNEL_PORT = int(os.environ.get("TUNNEL_PORT", "6379"))
 SNIFF_FILTER = f"tcp and (port {SERVER_PORT} or port {LISTEN_PORT})"
 SNIFF_IFACE = os.environ.get("SNIFF_IFACE", "eth0")
 
-
-# --------------------------------------------------------------------------
-# Packet log (shared between sniffer thread and asyncio handlers)
-# --------------------------------------------------------------------------
 
 class PacketLog:
     def __init__(self) -> None:
@@ -94,7 +84,6 @@ def _on_packet(pkt) -> None:
         return
     ip = pkt[IP]
     tcp = pkt[TCP]
-    # TCP payload length = total IP length - IP header - TCP header
     tcp_payload_len = ip.len - (ip.ihl * 4) - (tcp.dataofs * 4)
     record = {
         "ts": time.time(),
@@ -124,10 +113,6 @@ def start_sniffer() -> AsyncSniffer:
     sniffer.start()
     return sniffer
 
-
-# --------------------------------------------------------------------------
-# Passive TCP forwarder
-# --------------------------------------------------------------------------
 
 async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter, label: str) -> None:
     total = 0
@@ -176,10 +161,6 @@ async def handle_inbound(
     LOG.debug("forwarder session done for %s", peer)
 
 
-# --------------------------------------------------------------------------
-# HTTP control API
-# --------------------------------------------------------------------------
-
 async def handle_status(request: web.Request) -> web.Response:
     return web.json_response({
         "ok": True,
@@ -216,9 +197,8 @@ async def handle_trigger_secret(request: web.Request) -> web.Response:
 async def handle_trigger_payload(request: web.Request) -> web.Response:
     """Send a payload through the client's exposed tunnel port forward.
 
-    The attacker opens a TCP connection to the client's Redis tunnel
-    and writes the payload.  This data enters the SSH tunnel as
-    direct-tcpip channel data in the c->s direction.
+    The payload is written to the client's Redis tunnel; it enters the SSH
+    tunnel as direct-tcpip channel data in the c->s direction.
     """
     payload = await request.read()
     try:
@@ -238,21 +218,16 @@ async def handle_trigger_payload(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "bytes_sent": len(payload)})
 
 
-# --------------------------------------------------------------------------
-# BEAST variant: exploit page + WebSocket
-# --------------------------------------------------------------------------
-
 async def handle_exploit(request: web.Request) -> web.Response:
     with open("/app/exploit.html") as f:
         return web.Response(text=f.read(), content_type="text/html")
 
 
 async def handle_ws(request: web.Request) -> web.WebSocketResponse:
-    # heartbeat=30 sends a WebSocket ping every 30s; if the browser
-    # doesn't pong back, aiohttp closes the connection so a half-open
-    # bridge gets reaped promptly instead of lingering until the next
-    # /run_attack notices it. Without this, idle disconnects between
-    # trials surface as 503s on the next attack.
+    # heartbeat=30 sends a WebSocket ping every 30s; if the browser doesn't
+    # pong back, aiohttp closes the connection so a half-open bridge gets
+    # reaped promptly. Without this, idle disconnects between trials surface
+    # as 503s on the next /run_attack.
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
 
@@ -272,36 +247,28 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
-# --------------------------------------------------------------------------
-# Unified /run_attack endpoint — dispatches to the engine via per-variant
-# adapters.
-# --------------------------------------------------------------------------
-
 _ADAPTER_BY_VARIANT: dict[str, Any] = {
     "direct": DirectAdapter,
-    "beast": BeastAdapter,
+    "browser": BrowserAdapter,
     "ansible": AnsibleAdapter,
 }
 
-# Guards against concurrent /run_attack calls — two attacks interleaving on
-# the shared SSH compressor would destroy each other's measurements.
+# Two attacks interleaving on the shared SSH compressor would destroy each
+# other's measurements.
 _ATTACK_LOCK = asyncio.Lock()
 
 # One-shot cancel signal. /cancel always sets it (whether or not an attack
 # is currently running). The next /run_attack to enter handle_run_attack
-# observes it and short-circuits with abort_reason="cancelled" — either via
-# the engine's between-position check (if an attack starts and runs at
-# least one iteration) or via the pre-lock check below (if /cancel arrived
-# in the gap between trials, before /run_attack could acquire the lock).
-# The engine clears the event when it consumes it, making this a one-shot:
-# subsequent attacks proceed normally unless a fresh /cancel arrives.
+# observes it and short-circuits with abort_reason="cancelled" -- either
+# via the engine's between-position check or via the pre-lock check below
+# (closes the race where /cancel arrives between trials).
 _CANCEL_EVENT = asyncio.Event()
 
 
 def _build_adapter(adapter_cls: Any, variant: str) -> Any:
     if variant == "direct":
         return adapter_cls(packet_log=PACKET_LOG)
-    if variant == "beast":
+    if variant == "browser":
         return adapter_cls(packet_log=PACKET_LOG, bridge=BROWSER_BRIDGE)
     if variant == "ansible":
         return adapter_cls(packet_log=PACKET_LOG)
@@ -327,11 +294,10 @@ async def handle_run_attack(request: web.Request) -> web.Response:
         return web.json_response(
             {"ok": False, "error": f"unknown variant {variant!r}"}, status=400,
         )
-    if variant == "beast" and not BROWSER_BRIDGE.connected:
+    if variant == "browser" and not BROWSER_BRIDGE.connected:
         # The bridge may be momentarily down between trials (browser
-        # mid-reconnect after a heartbeat-detected drop). Give it a
-        # bounded grace period before declaring 503 — most transient
-        # disconnects clear within a couple of seconds.
+        # mid-reconnect after a heartbeat-detected drop); give it a bounded
+        # grace period before declaring 503.
         try:
             await BROWSER_BRIDGE.wait_ready(timeout=10)
         except asyncio.TimeoutError:
@@ -347,11 +313,9 @@ async def handle_run_attack(request: web.Request) -> web.Response:
     adapter = _build_adapter(adapter_cls, variant)
 
     LOG.info("HTTP /run_attack: variant=%s label=%r", variant, config.label)
-    # If /cancel arrived in the gap between trials (event set, no attack
-    # running), consume it here and return aborted=cancelled without
-    # acquiring the lock or running the engine. Safe in asyncio's
-    # single-threaded execution model: no `await` between is_set() and
-    # clear(), so no other coroutine can interleave.
+    # Consume any cancel event that arrived between trials, before acquiring
+    # the lock or running the engine. Safe in asyncio's single-threaded
+    # execution: no `await` between is_set() and clear().
     if _CANCEL_EVENT.is_set():
         _CANCEL_EVENT.clear()
         LOG.info("/run_attack pre-cancelled by pending /cancel signal")
@@ -383,40 +347,32 @@ async def handle_cancel(request: web.Request) -> web.Response:
     """Set the cancel event unconditionally.
 
     If an attack is in flight, the engine observes the event between
-    positions and aborts with reason="cancelled". If no attack is
-    running, the event remains set; the next /run_attack on this
-    container consumes it and returns aborted=cancelled immediately
-    (closes the race where the broadcast lands between trials).
+    positions and aborts with reason="cancelled". If no attack is running,
+    the event remains set; the next /run_attack on this container consumes
+    it and returns aborted=cancelled immediately.
     """
     was_running = _ATTACK_LOCK.locked()
     _CANCEL_EVENT.set()
     return web.json_response({"ok": True, "cancelled": True, "was_running": was_running})
 
 
-# --------------------------------------------------------------------------
-# main
-# --------------------------------------------------------------------------
-
 async def main() -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
-    # Silence the per-request aiohttp access log -- the Ansible variant
-    # fires thousands of /send_secret_ansible calls and each one would
-    # otherwise add noise to the attack progress log.
+    # The Ansible variant fires thousands of /send_secret_ansible calls per
+    # benchmark and each one would otherwise add a noisy line.
     logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 
     sniffer = start_sniffer()
 
-    # Start the TCP forwarder.
     forwarder = await asyncio.start_server(
         handle_inbound, host="0.0.0.0", port=LISTEN_PORT,
     )
     sockets = ", ".join(str(s.getsockname()) for s in forwarder.sockets)
     LOG.info("TCP forwarder listening on %s -> %s:%d", sockets, SERVER_HOST, SERVER_PORT)
 
-    # Start the HTTP control API.
     http_session = aiohttp.ClientSession()
     app = web.Application()
     app["http"] = http_session

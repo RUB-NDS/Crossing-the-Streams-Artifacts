@@ -1,1 +1,1 @@
-"""Unified attack engine for the CRIME-on-SSH PoC. See attacker/attack/engine.py."""
+"""Adaptive compression attack engine. See attacker/attack/engine.py."""

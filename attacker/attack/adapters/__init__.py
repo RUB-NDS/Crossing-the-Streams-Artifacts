@@ -1,1 +1,1 @@
-"""Adapter implementations for direct, BEAST, and ansible transports."""
+"""Adapter implementations for direct, browser, and ansible transports."""

@@ -1,7 +1,10 @@
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-
+# Claude Code local settings
+.claude/
+# Benchmark output
 benchmark_results.json
 benchmark_summary.csv

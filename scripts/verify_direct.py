@@ -1,22 +1,12 @@
-"""End-to-end smoke test for the PoC environment (direct variant).
+"""End-to-end verification for the direct-injection variant (Section 5.1).
 
-Run from the host (the docker-compose stack must be up):
+Run from the host while the docker-compose stack is up:
 
     python scripts/verify_direct.py
 
-Checks:
-  1. attacker HTTP control API responds
-  2. client HTTP control API responds AND reports
-        - SSH connection established
-        - zlib (or zlib@openssh.com) compression negotiated
-        - Redis tunnel port forward active
-  3. attacker can trigger client to send a Redis AUTH -> we observe
-     non-zero TCP segments on the wire
-  4. attacker can inject a payload through the Redis tunnel -> same
-     observation
-  5. Inject payload through Redis tunnel and capture packet log
-  6. Direct variant: recover hunter2 through /run_attack (two-phase
-     RESP length + password attack)
+Checks: HTTP control APIs reachable, SSH up with zlib compression, Redis
+tunnel active, packets observed during Redis AUTH and during a payload
+injection through the tunnel, and a two-phase recovery of "hunter2".
 """
 
 from __future__ import annotations
@@ -118,7 +108,6 @@ def main() -> int:
 
     step("4. Trigger Redis AUTH (send_secret) and capture packet log")
     http("POST", f"{ATTACKER_BASE}/clear_log")
-    print("  [..] cleared packet log")
     secret_trigger = http("POST", f"{ATTACKER_BASE}/trigger_secret")
     print(f"  [..] trigger_secret response: {secret_trigger}")
     time.sleep(0.4)
@@ -134,7 +123,6 @@ def main() -> int:
 
     step("5. Inject payload through Redis tunnel and capture packet log")
     http("POST", f"{ATTACKER_BASE}/clear_log")
-    print("  [..] cleared packet log")
     payload = b"*1\r\n$4\r\nPING\r\n"
     payload_trigger = http("POST", f"{ATTACKER_BASE}/trigger_payload",
                            body=payload)
@@ -181,14 +169,6 @@ def main() -> int:
     print("  [ok] hunter2 recovered")
 
     step("VERIFICATION PASSED")
-    print("All preconditions are met:")
-    print("  (1) SSH connection up with zlib compression")
-    print("  (2) Redis tunnel port forward active (0.0.0.0:6379)")
-    print("  (3) Attacker observes encrypted SSH packet sizes on the wire")
-    print("  (4) Attacker can trigger Redis AUTH (secret flows c->s)")
-    print("  (5) Attacker can inject data through the Redis tunnel (c->s)")
-    print("  (6) Direct variant recovered 'hunter2' end-to-end via /run_attack")
-    print("  Both data flows share a single zlib compression context.")
     return 0
 
 

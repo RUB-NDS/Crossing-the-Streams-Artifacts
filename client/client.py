@@ -1,44 +1,38 @@
-"""SSH client -- OpenSSH subprocess variant of the CRIME-on-SSH PoC.
+"""SSH client.
 
-Scenario
---------
 Two attack-target SSH connections live side by side in this container:
 
-1. **Redis tunnel (direct / BEAST variants).**  An OpenSSH subprocess
+1. **Redis tunnel (direct / browser variants).** An OpenSSH subprocess
    ``ssh -N -C -v -L 0.0.0.0:6379:redis:6379`` stays up for the life
-   of the container.  The victim's application authenticates to Redis
-   with ``AUTH default <password>`` through that tunnel.  The attacker
+   of the container. The victim's application authenticates to Redis
+   with ``AUTH default <password>`` through that tunnel. The attacker
    injects by connecting to ``client:6379`` (direct variant) or by
-   driving a headless Firefox via WebSocket (BEAST variant).
+   driving a headless Firefox via WebSocket (browser variant).
 
-2. **Ansible variant.**  The "victim" periodically runs an
-   ansible-playbook with ``become: yes``.  Each playbook invocation
+2. **Ansible variant.** The "victim" periodically runs an
+   ansible-playbook with ``become: yes``. Each playbook invocation
    spawns its own fresh ``ssh`` subprocess that uses the settings in
-   ``/root/.ssh/config`` -- including a ``LocalForward`` that the
-   user configured for something unrelated (e.g. a forwarded
-   database port).  Ansible writes the sudo password to that ssh's
-   stdin; OpenSSH wraps it in a single ``SSH_MSG_CHANNEL_DATA``
-   packet on the session channel, which is exactly what the attack
-   targets.  Each guess is a fresh ansible-playbook run (and
-   therefore a fresh SSH connection and a fresh zlib context), so
-   there is no compression-window flushing to do.
+   ``/root/.ssh/config`` -- including a ``LocalForward`` that the user
+   configured for something unrelated (e.g. a forwarded database port).
+   Ansible writes the sudo password to that ssh's stdin; OpenSSH wraps
+   it in a single ``SSH_MSG_CHANNEL_DATA`` packet on the session
+   channel, which is exactly what the attack targets. Each guess is a
+   fresh ansible-playbook run (and therefore a fresh SSH connection
+   and a fresh zlib context), so there is no compression-window
+   flushing to do.
 
-HTTP control API (for the test harness only -- the attacker never uses
+HTTP control API (test harness only -- the attacker never uses
 endpoints that reveal the secret):
 
-    GET  /status                 -- SSH state, port-forward info,
-                                    ansible state
-    POST /send_secret            -- trigger one Redis AUTH cycle
-                                    (direct / BEAST variants)
-    POST /set_secret             -- change the Redis password and
-                                    reconnect the main SSH tunnel
-    POST /reset                  -- reconnect the main SSH tunnel
-    POST /send_secret_ansible    -- kill any running ansible-playbook,
-                                    start a fresh one, and return as
-                                    soon as Ansible has written the
-                                    sudo password to ssh's stdin
-    POST /set_sudo_secret        -- change the victim's sudo password
-                                    via a root SSH login to the server
+    GET  /status                 SSH state, port-forward info, ansible state
+    POST /send_secret            trigger one Redis AUTH cycle (direct / browser)
+    POST /set_secret             change the Redis password and reconnect SSH
+    POST /reset                  reconnect the main SSH tunnel
+    POST /send_secret_ansible    kill any running ansible-playbook, start a fresh
+                                 one, and return as soon as Ansible has written
+                                 the sudo password to ssh's stdin
+    POST /set_sudo_secret        change the victim's sudo password via a root
+                                 SSH login to the server
 """
 
 import asyncio
@@ -63,9 +57,8 @@ async def _drain_for_marker(
     label: str,
 ) -> None:
     """Consume lines from *stream*, setting *event* when *marker* is seen.
-
     Keeps reading after the event is set so the pipe buffer doesn't fill
-    and block the subprocess.  Stops on EOF or cancellation.
+    and block the subprocess.
     """
     if stream is None:
         return
@@ -82,9 +75,6 @@ async def _drain_for_marker(
     except Exception:  # noqa: BLE001
         LOG.exception("[%s] drain error", label)
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 
 KEYS_DIR = "/keys"
 SERVER_HOST_KEY_PUB = os.path.join(KEYS_DIR, "server_host_key.pub")
@@ -96,15 +86,13 @@ SSH_REAL_SERVER = os.environ.get("SSH_REAL_SERVER", "server")
 SSH_USERNAME = os.environ.get("SSH_USERNAME", "victim")
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8000"))
 
-# Port-forward configuration --------------------------------------------------
 REDIS_TUNNEL_LOCAL_HOST = "0.0.0.0"
 REDIS_TUNNEL_LOCAL_PORT = int(os.environ.get("REDIS_TUNNEL_LOCAL_PORT", "6379"))
 REDIS_TUNNEL_DEST_HOST = os.environ.get("REDIS_TUNNEL_DEST_HOST", "redis")
 REDIS_TUNNEL_DEST_PORT = int(os.environ.get("REDIS_TUNNEL_DEST_PORT", "6379"))
 
-# Ansible variant port-forward configuration ----------------------------------
 # The "user's" /root/.ssh/config gets a LocalForward directive that Ansible
-# inherits automatically when it invokes ssh.  The destination is arbitrary
+# inherits automatically when it invokes ssh. The destination is arbitrary
 # (any port reachable from the SSH server will do); the point is that the
 # forward is a *pre-existing* user config entry, so Ansible runs with it
 # without the user realising it.
@@ -124,18 +112,12 @@ ANSIBLE_VARS_PATH = "/tmp/ansible_vars.json"
 
 # Marker emitted by Ansible's ssh connection plugin (plugins/connection/
 # ssh.py, line 1296) immediately before the sudo password is written to
-# the ssh subprocess's stdin.  Appears once per become-enabled task in
-# `-vvv` stdout.  We use it as a "password in flight" signal.
+# the ssh subprocess's stdin. Appears once per become-enabled task in
+# `-vvv` stdout. We use it as a "password in flight" signal.
 ANSIBLE_PASSWORD_SENT_MARKER = b"Sending become_password in response to prompt"
 
-# Redis username used for ACL-style AUTH (Redis 6+).
-# redis-py sends ``AUTH default <password>`` in RESP format.
 REDIS_USERNAME = "default"
 
-
-# ---------------------------------------------------------------------------
-# SSH subprocess state
-# ---------------------------------------------------------------------------
 
 class SSHState:
     """Manages the OpenSSH client subprocess and its local port forward."""
@@ -147,33 +129,27 @@ class SSHState:
         self._lock = asyncio.Lock()
         self._negotiated: dict[str, str] = {}
         self._stderr_task: Optional[asyncio.Task] = None
-        # Ring buffer of the most recent ssh -v stderr lines. Captured by
-        # _drain_stderr; surfaced in RuntimeError messages from
-        # _wait_for_tunnels so a 255-exit reports the actual OpenSSH cause
-        # (e.g. "bind: Address already in use", "Connection refused").
+        # Ring buffer of the most recent ssh -v stderr lines. Surfaced in
+        # RuntimeError messages from _wait_for_tunnels so a 255-exit reports
+        # the actual OpenSSH cause (e.g. "bind: Address already in use").
         self._stderr_tail: deque[str] = deque(maxlen=64)
         self._playwright = None
         self._browser = None
-        # Ansible variant state ------------------------------------------
         # Only one ansible-playbook runs at a time; a new /send_secret_ansible
         # call always kills the previous one before starting its own.
         self.ansible_proc: Optional[asyncio.subprocess.Process] = None
         self._ansible_lock = asyncio.Lock()
         self._ansible_drain_tasks: list[asyncio.Task] = []
 
-    # -- SSH lifecycle --------------------------------------------------------
-
     def _write_known_hosts(self) -> None:
-        """Build a known_hosts file from the server's public key.
-
-        We pin the *real* server's host key under two names:
+        """Pin the *real* server's host key under two names:
 
         * ``[attacker]:2222`` -- used by the main Redis-tunnel ssh (which
           dials the attacker's TCP forwarder) and by ansible-playbook
           (same route, so the attacker can sniff).
         * ``server`` on port 22 -- used by the /set_sudo_secret helper,
           which SSHes *directly* to the server as root to rotate the
-          victim's sudo password.  Going direct keeps the housekeeping
+          victim's sudo password. Going direct keeps the housekeeping
           traffic off the attacker's wire.
         """
         with open(SERVER_HOST_KEY_PUB) as f:
@@ -189,27 +165,18 @@ class SSHState:
     def _write_ssh_config(self) -> None:
         """Generate /root/.ssh/config with two Host blocks.
 
-        ``Host ansible-target`` is what ansible-playbook connects to.
-        It goes through the attacker's TCP forwarder on purpose (so the
-        sniffer sees the traffic) and declares the LocalForward that the
-        attack injects through -- exactly the kind of "innocent helper
-        port forward the user pasted into their ssh_config and forgot
-        about" that the Ansible variant's threat model relies on.
+        ``Host ansible-target`` is what ansible-playbook connects to. It
+        goes through the attacker's TCP forwarder (so the sniffer sees the
+        traffic) and declares the LocalForward that the attack injects
+        through -- exactly the kind of "innocent helper port forward the
+        user pasted into their ssh_config and forgot about" that the
+        Ansible variant's threat model relies on.
 
         ``Host server-root`` is what /set_sudo_secret uses to rotate the
-        victim's sudo password via chpasswd.  It goes *directly* to the
+        victim's sudo password via chpasswd. It goes *directly* to the
         server so the sniffer never sees the housekeeping traffic.
         """
         config = (
-            "# Auto-generated by client.py at startup -- do not hand-edit.\n"
-            "\n"
-            "# ansible-target: used by ansible-playbook for the CRIME-on-SSH\n"
-            "# Ansible variant.  Goes via the attacker's TCP forwarder so\n"
-            "# scapy can see the password CHANNEL_DATA and the injected\n"
-            "# CHANNEL_DATA on the same wire.  The LocalForward directive\n"
-            "# is inherited automatically by ansible-playbook -- the user\n"
-            "# configured it for some unrelated purpose and is unaware it\n"
-            "# opens an attack surface while ansible runs.\n"
             "Host ansible-target\n"
             f"    HostName {SSH_TARGET_HOST}\n"
             f"    Port {SSH_TARGET_PORT}\n"
@@ -225,10 +192,6 @@ class SSHState:
             "    ServerAliveInterval 60\n"
             "    ServerAliveCountMax 3\n"
             "\n"
-            "# server-root: used by /set_sudo_secret to rotate the victim's\n"
-            "# sudo password via `chpasswd` over a root SSH login.  Goes\n"
-            "# *direct* to the server (bypassing the attacker's forwarder)\n"
-            "# so the scapy sniffer never observes this traffic.\n"
             "Host server-root\n"
             f"    HostName {SSH_REAL_SERVER}\n"
             "    Port 22\n"
@@ -253,9 +216,9 @@ class SSHState:
         )
         return [
             "ssh",
-            "-N",                                           # no remote command
-            "-C",                                           # enable compression
-            "-v",                                           # verbose (parse negotiated algs)
+            "-N",
+            "-C",
+            "-v",
             "-o", "StrictHostKeyChecking=yes",
             "-o", f"UserKnownHostsFile={KNOWN_HOSTS_PATH}",
             "-o", "ExitOnForwardFailure=yes",
@@ -268,11 +231,10 @@ class SSHState:
         ]
 
     async def connect(self) -> None:
-        """Launch ssh subprocess with port forwards."""
         self._write_known_hosts()
         self._write_ssh_config()
-        # Fresh ring buffer per connect — a RuntimeError raised below
-        # should only surface stderr from this attempt, not the prior one.
+        # A RuntimeError raised below should only surface stderr from this
+        # attempt, not the prior one.
         self._stderr_tail.clear()
         cmd = self._build_ssh_cmd()
         LOG.info("launching: %s", " ".join(cmd))
@@ -281,19 +243,15 @@ class SSHState:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        # Parse negotiated algorithms from ssh -v stderr
         self._negotiated = await self._parse_kex(timeout=15)
         LOG.info("negotiated: %s", self._negotiated)
-        # Start a background task to drain stderr so the pipe never fills
-        # and blocks the ssh process.
         self._stderr_task = asyncio.create_task(self._drain_stderr())
-        # Wait for tunnels to accept connections
         await self._wait_for_tunnels(timeout=15)
         LOG.info("SSH tunnels ready")
 
     async def _drain_stderr(self) -> None:
         """Read ssh -v stderr to prevent pipe buffer deadlock; tail-buffer
-        each line into _stderr_tail so a 255-exit can be diagnosed."""
+        each line so a 255-exit can be diagnosed."""
         assert self.ssh_proc is not None and self.ssh_proc.stderr is not None
         try:
             while True:
@@ -307,7 +265,7 @@ class SSHState:
             pass
 
     async def _parse_kex(self, timeout: float = 15) -> dict[str, str]:
-        """Read ssh -v stderr until kex lines appear or authentication completes."""
+        """Read ssh -v stderr until kex lines appear or auth completes."""
         info: dict[str, str] = {}
         deadline = asyncio.get_event_loop().time() + timeout
         assert self.ssh_proc is not None
@@ -326,7 +284,6 @@ class SSHState:
             line = line_bytes.decode("utf-8", errors="replace").strip()
             LOG.debug("ssh: %s", line)
             self._stderr_tail.append(line)
-            # debug1: kex: server->client cipher: ... compression: ...
             if "kex: client->server" in line or "kex: server->client" in line:
                 direction = "send" if "client->server" in line else "recv"
                 for field in ("cipher:", "compression:", "MAC:"):
@@ -339,7 +296,6 @@ class SSHState:
         return info
 
     async def _wait_for_tunnels(self, timeout: float = 30) -> None:
-        """Poll local port until the Redis tunnel accepts connections."""
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
             if self.ssh_proc and self.ssh_proc.returncode is not None:
@@ -364,8 +320,6 @@ class SSHState:
         )
 
     def _format_stderr_tail(self) -> str:
-        """Return the tail-buffered ssh stderr as a suffix for a raised
-        error. Empty string if nothing was captured."""
         if not self._stderr_tail:
             return ""
         return (
@@ -394,8 +348,6 @@ class SSHState:
         self.ssh_proc = None
         self._negotiated = {}
 
-    # -- Redis interaction ---------------------------------------------------
-
     async def init_redis_password(self) -> None:
         """Set the initial Redis password (Redis starts with none)."""
         for attempt in range(1, 21):
@@ -416,9 +368,9 @@ class SSHState:
     async def send_secret(self) -> int:
         """Simulate the application connecting to Redis and authenticating.
 
-        Opens a fresh redis-py connection through the tunnel; redis-py
-        sends ``AUTH default <password>`` in RESP format.  The connection
-        is closed afterwards, just like a short-lived pool checkout.
+        Opens a fresh redis-py connection through the tunnel; redis-py sends
+        ``AUTH default <password>`` in RESP format. The connection is closed
+        afterwards, just like a short-lived pool checkout.
         """
         async with self._lock:
             r = aioredis.Redis(
@@ -435,7 +387,6 @@ class SSHState:
         return 0
 
     async def reconfigure_redis(self, new_password: str) -> None:
-        """Change the Redis requirepass at runtime via CONFIG SET."""
         r = aioredis.Redis(
             host="127.0.0.1", port=REDIS_TUNNEL_LOCAL_PORT,
             username=REDIS_USERNAME,
@@ -448,21 +399,12 @@ class SSHState:
         finally:
             await r.aclose()
 
-    # -- Ansible variant ------------------------------------------------------
-
     async def set_sudo_password(self, new_password: str) -> None:
         """SSH to the server as root and change the victim's sudo password.
 
-        The server's /etc/sudoers.d/victim entry requires a password for
-        sudo; the PoC attack target is exactly that password (which the
-        Ansible become plugin writes to ssh's stdin on every become
-        task).  This helper lets the test harness rotate the password
-        between runs the same way the Redis variant rotates the Redis
-        password via ``CONFIG SET requirepass``.
-
-        It also waits for any currently running ansible-playbook to
-        exit naturally (or kills it if stuck), since that subprocess
-        would still be holding the old password in memory.
+        Also waits for any currently running ansible-playbook to exit
+        naturally (or kills it if stuck), since that subprocess would still
+        be holding the old password in memory.
         """
         async with self._ansible_lock:
             await self._kill_ansible_locked()
@@ -491,16 +433,16 @@ class SSHState:
         LOG.info("sudo password rotated (length=%d)", len(new_password))
 
     async def _kill_ansible_locked(self) -> None:
-        """Terminate a running ansible-playbook subprocess, if any.
+        """Terminate a running ansible-playbook subprocess, if any. Caller
+        must hold ``self._ansible_lock``.
 
-        Caller must hold ``self._ansible_lock``.  With ControlMaster
-        disabled, the SSH slave that ansible-playbook spawned is the
-        only thing holding the LocalForward port binding, and the
-        next iteration wants that port to be free the instant it
-        starts its own ansible-playbook.  We therefore kill the whole
-        process group (ansible-playbook + its children including the
-        ssh slave) with SIGTERM, falling back to SIGKILL if the group
-        doesn't exit promptly.
+        With ControlMaster disabled, the SSH slave that ansible-playbook
+        spawned is the only thing holding the LocalForward port binding,
+        and the next iteration wants that port to be free the instant it
+        starts its own ansible-playbook. We therefore kill the whole
+        process group (ansible-playbook + its children including the ssh
+        slave) with SIGTERM, falling back to SIGKILL if the group doesn't
+        exit promptly.
         """
         proc = self.ansible_proc
         if proc is None:
@@ -522,7 +464,6 @@ class SSHState:
         for task in self._ansible_drain_tasks:
             if not task.done():
                 task.cancel()
-        # Let the cancellations propagate so the pipes can close cleanly.
         for task in self._ansible_drain_tasks:
             try:
                 await task
@@ -532,27 +473,15 @@ class SSHState:
         self.ansible_proc = None
 
     async def send_secret_ansible(self, timeout: float = 20.0) -> dict:
-        """Wait for any previous ansible-playbook run to exit, start a
-        fresh one, and return as soon as Ansible has written the sudo
-        password to ssh's stdin.
-
-        The playbook's only task is ``raw: 'true'``, which exits as
-        soon as sudo validates the password (so the previous run
-        is typically already gone by the time the next call arrives,
-        but this helper still blocks on its exit when it isn't --
-        see ``_wait_for_previous_ansible_locked`` for why that matters
-        for session-channel numbering).  With SSH ControlMaster enabled
-        the SSH transport (and its LocalForward) outlive every
-        ansible-playbook run via ControlPersist, so the attacker's
-        measure tunnel can keep injecting into the same zlib
-        compression context without re-handshaking.
+        """Wait for any previous ansible-playbook run to exit, start a fresh
+        one, and return as soon as Ansible has written the sudo password to
+        ssh's stdin.
         """
         async with self._ansible_lock:
             await self._kill_ansible_locked()
 
-            # Write an extra-vars file with the current sudo password.
-            # Using a file (mode 0o600) instead of --extra-vars on argv
-            # keeps the password out of `ps`.
+            # Pass the password through a 0o600 file rather than --extra-vars
+            # on argv so it doesn't show up in `ps`.
             with open(ANSIBLE_VARS_PATH, "w") as f:
                 json.dump({"ansible_become_password": self.sudo_secret}, f)
             os.chmod(ANSIBLE_VARS_PATH, 0o600)
@@ -561,10 +490,10 @@ class SSHState:
             env["ANSIBLE_CONFIG"] = "/app/ansible/ansible.cfg"
             env["PYTHONUNBUFFERED"] = "1"
             env["ANSIBLE_FORCE_COLOR"] = "0"
-            # Enables display.debug() in Ansible, which is the code
-            # path that fires the "Sending become_password in response
-            # to prompt" marker we detect below.  Without ANSIBLE_DEBUG
-            # that line never reaches stdout regardless of -vvv.
+            # Enables display.debug() in Ansible, which is the code path that
+            # emits the "Sending become_password in response to prompt" marker
+            # we detect below. Without ANSIBLE_DEBUG that line never reaches
+            # stdout regardless of -vvv.
             env["ANSIBLE_DEBUG"] = "1"
 
             cmd = [
@@ -574,9 +503,6 @@ class SSHState:
                 "--extra-vars", f"@{ANSIBLE_VARS_PATH}",
                 ANSIBLE_PLAYBOOK_PATH,
             ]
-            # Debug-level: the Ansible variant fires a fresh ansible-playbook
-            # subprocess per attack iteration and we don't want to log each
-            # one.  Kept visible via `docker compose logs client` in DEBUG mode.
             LOG.debug("send_secret_ansible: launching %s", " ".join(cmd))
 
             self.ansible_proc = await asyncio.create_subprocess_exec(
@@ -590,8 +516,6 @@ class SSHState:
                 start_new_session=True,
             )
 
-            # Drain both streams, looking for the "password sent" marker
-            # in whichever stream Ansible happens to write it to.
             password_sent = asyncio.Event()
             self._ansible_drain_tasks = [
                 asyncio.create_task(
@@ -612,8 +536,8 @@ class SSHState:
                 ),
             ]
 
-            # Also guard against ansible dying before the marker
-            # (e.g. wrong password, connection refused, ...).
+            # Guard against ansible dying before the marker (e.g. wrong
+            # password, connection refused).
             exit_task = asyncio.create_task(self.ansible_proc.wait())
             marker_task = asyncio.create_task(password_sent.wait())
             try:
@@ -635,8 +559,6 @@ class SSHState:
                     "marker": "password_sent",
                     "sudo_password_length": len(self.sudo_secret),
                 }
-            # Didn't see the marker.  Either ansible exited (rc != 0,
-            # probably wrong password / sudo failure) or we timed out.
             marker_task.cancel()
             if exit_task.done():
                 rc = self.ansible_proc.returncode
@@ -646,14 +568,11 @@ class SSHState:
                     f"writing the become password -- wrong sudo "
                     f"password, connection refused, or config error"
                 )
-            # Timeout: kill and bail out.
             await self._kill_ansible_locked()
             raise asyncio.TimeoutError(
                 f"ansible-playbook did not reach the 'Sending "
                 f"become_password' marker within {timeout:.1f}s"
             )
-
-    # -- Browser automation (BEAST variant) ------------------------------------
 
     async def launch_browser(self) -> None:
         """Launch headless Firefox and load the attacker's exploit page.
@@ -726,20 +645,15 @@ class SSHState:
         }
 
 
-# ---------------------------------------------------------------------------
-# HTTP control plane
-# ---------------------------------------------------------------------------
-
-
 async def _retry_call(coro_factory, *, op_name: str,
                       attempts: int = 3, delay: float = 1.0):
     """Call ``coro_factory()`` with retries on any exception.
 
     ``coro_factory`` is a no-arg callable returning a fresh coroutine on
-    every call (a coroutine can only be awaited once, so we can't accept
-    a pre-built one). Used by the per-trial handlers to absorb transient
-    connection failures (e.g. ``ssh: Connection timed out`` from chpasswd
-    when the host is saturated under a 100-stack benchmark).
+    every call (a coroutine can only be awaited once). Used by the
+    per-trial handlers to absorb transient connection failures (e.g.
+    ``ssh: Connection timed out`` from chpasswd when the host is saturated
+    under a 100-stack benchmark).
     """
     last_exc: BaseException | None = None
     for attempt in range(1, attempts + 1):
@@ -857,9 +771,8 @@ async def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
-    # Silence the per-request aiohttp access log -- the Ansible variant
-    # fires a /send_secret_ansible per attack iteration and each one would
-    # otherwise add a noisy line to `docker compose logs client`.
+    # The Ansible variant fires a /send_secret_ansible per attack iteration;
+    # silence aiohttp.access so each one doesn't add a noisy line.
     logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 
     state = SSHState(
@@ -881,9 +794,9 @@ async def main() -> int:
 
     await state.init_redis_password()
 
-    # Set the initial victim sudo password via a root SSH + chpasswd so
-    # that the first /send_secret_ansible call has something to send.
-    # sshd must already be up (the main SSH connect above proves it).
+    # Set the initial victim sudo password via a root SSH + chpasswd so that
+    # the first /send_secret_ansible call has something to send. sshd must
+    # already be up (the main SSH connect above proves it).
     for attempt in range(1, 11):
         try:
             await state.set_sudo_password(DEFAULT_SUDO_SECRET)
@@ -909,11 +822,10 @@ async def main() -> int:
     await site.start()
     LOG.info("HTTP control API listening on 0.0.0.0:%d", HTTP_PORT)
 
-    # Launch browser for the BEAST attack variant.
     try:
         await state.launch_browser()
     except Exception as exc:  # noqa: BLE001
-        LOG.warning("browser launch failed (BEAST variant unavailable): %s", exc)
+        LOG.warning("browser launch failed (browser variant unavailable): %s", exc)
 
     await asyncio.Event().wait()
     return 0

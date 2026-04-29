@@ -1,8 +1,8 @@
 FROM python:3.14-slim
 
-# tcpdump is handy for ad-hoc inspection.  libpcap is optional for
-# scapy on Linux (it can use AF_PACKET sockets directly with NET_RAW),
-# but we install it so scapy can pick the most efficient backend.
+# libpcap is optional for scapy on Linux (it can use AF_PACKET sockets
+# directly with NET_RAW), but installing it lets scapy pick the most
+# efficient backend.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates tcpdump libpcap0.8 \
@@ -15,16 +15,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY attacker/mitm.py attacker/exploit.html ./
 
-# New unified engine package.  The engine uses `from attacker.attack.*`
-# imports, so we replicate the on-disk layout: /app/attacker/attack/.
-# /app is already on sys.path (it is the WORKDIR / the CMD's cwd).
+# The engine uses `from attacker.attack.*` imports, so we replicate the
+# on-disk layout: /app/attacker/attack/. /app is on sys.path (it is the
+# WORKDIR / the CMD's cwd).
 RUN mkdir -p attacker
 RUN touch attacker/__init__.py
 COPY attacker/attack/ attacker/attack/
 
 # Pin sibling-container hostnames in /etc/hosts at startup so the main
-# process never queries Docker's embedded DNS resolver (127.0.0.11)
-# under burst load. See scripts/pin-hosts.sh for rationale.
+# process never queries Docker's embedded DNS resolver under burst load.
+# See scripts/pin-hosts.sh for rationale.
 COPY scripts/pin-hosts.sh /usr/local/bin/pin-hosts.sh
 RUN chmod +x /usr/local/bin/pin-hosts.sh
 

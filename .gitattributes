@@ -8,5 +8,3 @@
 *.cfg text eol=lf
 Dockerfile text eol=lf
 sshd_config text eol=lf
-entrypoint.sh text eol=lf
-keygen.sh text eol=lf

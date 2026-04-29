@@ -1,10 +1,7 @@
 name: ssh-compression-poc
 
 services:
-  # ----------------------------------------------------------------------
   # Generates SSH host key + client user key on a shared volume.
-  # Other services depend on this completing successfully.
-  # ----------------------------------------------------------------------
   keygen:
     build:                   # reuse server image (has ssh-keygen)
       context: .
@@ -13,20 +10,17 @@ services:
     volumes:
       - ./keys:/keys
       - ./scripts:/scripts:ro
-    # Bypass the server image's pin-hosts ENTRYPOINT: keygen runs first
-    # in the dependency order, so siblings don't exist yet and pinning
-    # would burn ~30s per peer waiting for them. keygen also doesn't
-    # need DNS — it only writes to a shared volume.
+    # Bypass the server image's pin-hosts ENTRYPOINT: keygen runs first in
+    # the dependency order, so siblings don't exist yet and pinning would
+    # burn ~30s per peer waiting for them.
     entrypoint: []
     command: ["/bin/sh", "/scripts/keygen.sh"]
     networks:
       - sshpoc
 
-  # ----------------------------------------------------------------------
-  # Internal Redis server.  The victim's application authenticates to it
-  # with AUTH <password> through the SSH tunnel.  Started WITHOUT a
-  # password -- the client sets one via CONFIG SET after the tunnel is up.
-  # ----------------------------------------------------------------------
+  # The victim's application authenticates to this Redis with AUTH <password>
+  # through the SSH tunnel. Started without a password -- the client sets one
+  # via CONFIG SET after the tunnel is up.
   redis:
     image: redis:8-alpine
     container_name: poc-redis
@@ -34,10 +28,8 @@ services:
     networks:
       - sshpoc
 
-  # ----------------------------------------------------------------------
-  # SSH server (the bastion / jump host).  Forces compression, allows
-  # TCP/IP port forwarding to redis on the internal network.
-  # ----------------------------------------------------------------------
+  # SSH server. Forces compression, allows TCP/IP port forwarding to redis
+  # on the internal network.
   server:
     build:
       context: .
@@ -54,10 +46,9 @@ services:
     networks:
       - sshpoc
 
-  # ----------------------------------------------------------------------
-  # Attacker: passive MitM at the TCP layer + scapy packet observer +
-  # attack orchestrator.  Sits on the path between client and server.
-  # ----------------------------------------------------------------------
+  # Attacker: passive on-path observer at the TCP layer + scapy packet
+  # observer + attack orchestrator. Sits on the path between client and
+  # server but never decrypts or modifies SSH traffic.
   attacker:
     build:
       context: .
@@ -78,7 +69,7 @@ services:
       - CLIENT_CONTROL_URL=http://client:8000
       - CLIENT_HOST=client
       # Local forward ports on the client that the attacker dials into.
-      # TUNNEL_PORT is the Redis tunnel used by the direct/BEAST variants;
+      # TUNNEL_PORT is the Redis tunnel used by the direct/browser variants;
       # ANSIBLE_TUNNEL_PORT is the LocalForward declared in the client's
       # /root/.ssh/config and used by the Ansible variant.
       - TUNNEL_PORT=6379
@@ -88,11 +79,9 @@ services:
     networks:
       - sshpoc
 
-  # ----------------------------------------------------------------------
-  # Client (the victim host).  Connects via the attacker's TCP forwarder,
-  # sets up a local port forward (Redis on 0.0.0.0), and exposes a small
-  # HTTP control API used by the test harness.
-  # ----------------------------------------------------------------------
+  # Client (the victim host). Connects via the attacker's TCP forwarder,
+  # sets up local port forwards, and exposes a small HTTP control API used
+  # by the test harness.
   client:
     build:
       context: .
@@ -119,8 +108,8 @@ services:
       - REDIS_TUNNEL_DEST_PORT=6379
       - SECRET_VALUE=hunter2
       # Ansible variant: the LocalForward that the user has "already
-      # configured" in /root/.ssh/config and that ansible-playbook
-      # inherits when it runs a become-task.  The attacker connects to
+      # configured" in /root/.ssh/config and that ansible-playbook inherits
+      # when it runs a become-task. The attacker connects to
       # client:ANSIBLE_TUNNEL_LOCAL_PORT to inject into the same zlib
       # compression context as the Ansible sudo password.
       - ANSIBLE_TUNNEL_LOCAL_PORT=15432
