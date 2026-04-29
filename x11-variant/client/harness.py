@@ -20,6 +20,7 @@ class SSHSession:
     def __init__(self) -> None:
         self._proc: asyncio.subprocess.Process | None = None
         self._counter = 0
+        self._io_lock = asyncio.Lock()
 
     async def open(self) -> None:
         cmd = [
@@ -46,9 +47,10 @@ class SSHSession:
         await self._sync("__READY__")
 
     async def trigger_xset(self) -> None:
-        token = self._next_token("TRIG")
-        await self._send_line(f"xset q >/dev/null; echo {token}")
-        await self._read_until(token)
+        async with self._io_lock:
+            token = self._next_token("TRIG")
+            await self._send_line(f"xset q >/dev/null; echo {token}")
+            await self._read_until(token)
 
     async def close(self) -> None:
         if self._proc is None:

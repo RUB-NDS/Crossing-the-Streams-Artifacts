@@ -16,10 +16,10 @@ ENGINE_PORT = int(os.environ.get("ENGINE_PORT", "9000"))
 HARNESS_URL = os.environ.get("HARNESS_URL", "http://client:8000")
 SETTLE_S = float(os.environ.get("SETTLE_S", "0.15"))
 TX_BYTES_PATH = os.environ.get("TX_BYTES_PATH", DEFAULT_TX_BYTES_PATH)
-COOKIE_LENGTH = 16
-MIN_MARGIN = 8
-MIN_AGREEMENT = 5
-MAX_ROUNDS = 16
+COOKIE_LENGTH = int(os.environ.get("COOKIE_LENGTH", "16"))
+MIN_MARGIN = int(os.environ.get("MIN_MARGIN", "8"))
+MIN_AGREEMENT = int(os.environ.get("MIN_AGREEMENT", "5"))
+MAX_ROUNDS = int(os.environ.get("MAX_ROUNDS", "16"))
 
 
 def _make_oracle(target_port: int, http: aiohttp.ClientSession):
