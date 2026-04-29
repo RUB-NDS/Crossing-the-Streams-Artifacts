@@ -7,13 +7,10 @@ services:
     networks: [x11net]
     volumes:
       - keys:/srv/keys
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
     environment:
       COOKIE_LENGTH: "1"
-      MAX_ROUNDS: "4"
-      MIN_MARGIN: "2"
+      MAX_ROUNDS: "8"
+      MIN_MARGIN: "1"
       MIN_AGREEMENT: "1"
       SETTLE_S: "0.20"
 
