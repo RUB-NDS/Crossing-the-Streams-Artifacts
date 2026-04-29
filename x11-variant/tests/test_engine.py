@@ -133,5 +133,20 @@ class FindNextByteTests(unittest.IsolatedAsyncioTestCase):
             )
 
 
+class RunAttackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recovers_full_cookie_synthetic(self):
+        from attacker.engine import run_attack
+        cookie = bytes.fromhex("a1b2c3d4e5f60718293a4b5c6d7e8f90")
+        oracle = SyntheticOracle(cookie)
+        recovered = await run_attack(
+            oracle=oracle,
+            cookie_length=16,
+            min_margin=8,
+            min_agreement=5,
+            max_rounds=4,
+        )
+        self.assertEqual(recovered, cookie)
+
+
 if __name__ == "__main__":
     unittest.main()

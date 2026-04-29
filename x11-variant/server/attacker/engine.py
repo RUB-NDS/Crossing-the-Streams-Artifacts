@@ -74,3 +74,24 @@ async def find_next_byte(
     raise RecoveryFailed(
         f"position {byte_index} did not lock after {max_rounds} rounds"
     )
+
+
+async def run_attack(
+    oracle,
+    cookie_length: int,
+    min_margin: int,
+    min_agreement: int,
+    max_rounds: int,
+) -> bytes:
+    recovered = b""
+    for byte_index in range(cookie_length):
+        winner = await find_next_byte(
+            oracle=oracle,
+            prefix=recovered,
+            byte_index=byte_index,
+            min_margin=min_margin,
+            min_agreement=min_agreement,
+            max_rounds=max_rounds,
+        )
+        recovered += winner
+    return recovered
