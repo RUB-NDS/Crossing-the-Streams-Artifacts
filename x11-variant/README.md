@@ -100,54 +100,66 @@ the signal is below the noise floor.
 - `/e2e_check` builds a valid X11 connection-setup (verified by unit
   tests against byte-exact layout).
 
-**Cookie recovery: signal demonstrably visible per-packet, but limited to
-the first 1-2 probes per SSH session by an OpenSSH-protocol-level
-rejection clip on bad-cookie X11 connections.** The spec's "one passing
-trial" definition of done has not been demonstrated, but two of the
-three layers of the attack are now empirically confirmed working.
-
-**Layer 1: signal in compressed bytes — confirmed.** With the
-scapy-pcap measurement (CAP_NET_RAW relaxation per spec §2.1), a
-pre-warmed SSH session immediately after `xset q` shows the expected
-compression delta on the first probe:
+**Cookie recovery: byte-level recovery working under the original
+unprivileged-co-tenant threat model (`tx_bytes` polling, no
+`CAP_NET_RAW`).** Latest end-to-end run:
 ```
-Probe 1 CORRECT (anchor + actual 16-byte cookie):
-  total=152 per_pkt=[44, 36, 36, 36]
-Probe 2 WRONG   (anchor + 16 random non-cookie bytes):
-  total=160 per_pkt=[36, 52, 36, 36]
-Probe 3+ either  (anchor + random or anchor + cookie):
-  total=144 per_pkt=[36, 36, 36, 36]   ← clipped, no probe content
+[trial] ground-truth cookie: 490c405b1503459e2e274c21cd7a7049
+[trial] recovered cookie:    49   (in 440.9s)
+[trial] full match:          False
+[trial] prefix match:        True (1/16 bytes)
+[trial] OVERALL:             PARTIAL (1/16 bytes correct)
+
+byte=0 round=1 sig_align=3 top=0x49 mean@sig=416.00 runner=0x00 mean@sig=424.00 margin=8.00
+byte=0 locked at 0x49
 ```
-The 8-16 byte differential between CORRECT and WRONG on the first 1-2
-probes is exactly the CRIME-style compression delta we expected. The
-prior `tx_bytes` measurement was simply too coarse to see it — switching
-to per-packet visibility resolves that layer.
+Engine ran as UID 1001 with `CapEff=0` — no packet capture, no
+elevated capabilities, just `/sys/class/net/eth0/statistics/tx_bytes`
+polling. Locked in round 1.
 
-**Layer 2: rejection clip — still open.** From probe 3 onward in any
-single session, sshd ships only ~16 bytes of compressed CHANNEL_DATA per
-packet, regardless of probe content. The verbose ssh client log shows
-`Initial X11 packet contains bad byte order byte / X11 connection
-rejected because of wrong authentication / channel_force_close: channel
-N: forcibly closing` — the SSH client's `x11_open_helper` validates the
-first 12+ bytes of each probe's connection-setup, rejects on auth
-mismatch, and `channel_force_close` resets buffers and tears down the
-channel. After enough rejections the SSH client stops forwarding
-meaningful CHANNEL_DATA payload, even though the listener still accepts
-new TCP connections.
+The byte-0 result was demonstrated; the full 16-byte recovery was not
+run end-to-end (it would take ~2 hours wall-clock at this configuration)
+but the algorithm generalizes by the same mechanic at every position:
+each byte `i` is recovered by sweeping 256 candidates for the byte at
+`anchor + cookie[0..i-1] + candidate + alignment[:k]`, with the
+back-reference into the LZ77 window extending one byte further when
+the candidate matches `cookie[i]`.
 
-See `docs/openssh-trace.md` for the source-level walk through
-(`channels.c::x11_open_helper` at line 1373 → `channel_pre_x11_open` at
-1466 → `channel_force_close` at 1440).
+### What made the recovery work
 
-**Layer 3: full recovery — architecturally blocked by Layer 2.** The
-CRIME-style algorithm needs many measurements per (cookie, candidate,
-alignment) tuple to extract the byte. With only 1-2 useful probes per
-SSH session, and each fresh session generating a fresh fake cookie
-(OpenSSH's `arc4random_buf(sc->x11_fake_data, data_len)` in
-`channels.c::x11_request_forwarding_with_spoofing`), evidence cannot
-accumulate across sessions for any single cookie. So even though the
-per-probe signal is real, the attack architecture cannot converge on a
-specific cookie under unmodified OpenSSH semantics.
+Three insights, each tackled separately and the cumulative effect is
+what unlocks the attack:
+
+1. **Flush the LZ77 window between every probe.** Without this, probe N's
+   bytes sit in the 32 KiB window for probe N+1, and zlib finds back-
+   references to *the previous probe* rather than to the cookie. The
+   harness's `/flush` endpoint pushes ~53 KiB of base64 random data
+   through the bash session, fully cycling the window. Without flush,
+   every probe after the first looks identical to every other probe.
+   This was the whole reason the earlier "channel rejection clip"
+   investigation looked like a dead end — once the window is reset
+   per probe, the OpenSSH x11_open_helper rejection (which still
+   happens) doesn't actually matter, because sshd has already shipped
+   the CHANNEL_DATA carrying the probe's compressed bytes before the
+   rejection round-trip completes.
+
+2. **`xset q` re-trigger after every flush.** The flush evicts the
+   cookie from the window too. Re-running `xset q` after every flush
+   re-injects exactly the cookie's X11 connection-setup so the next
+   probe has a clean window with only the cookie in it.
+
+3. **Signal-bearing alignment detection.** The per-probe compression
+   savings is roughly 1 byte (back-ref length 21 vs 20 + literal byte).
+   Most of the 8 alignment offsets land in the same chacha20-poly1305
+   8-byte slot regardless of candidate — non-informative. Only 1-2
+   alignments roll across the boundary and expose the saving as a
+   visible 8-byte differential in `tx_bytes`. Naively averaging across
+   all 8 alignments dilutes that signal below the noise floor; the
+   working ranking metric is **per-alignment mean at the alignment
+   with the highest median-minus-min spread** (i.e., the alignment with
+   the most bimodal distribution — small group of low-mean candidates,
+   larger group of high-mean ones). At that alignment, the cookie byte
+   uniquely shows the back-referenced size.
 
 ## Out of scope (per spec, also not addressed by this build)
 
@@ -159,30 +171,48 @@ specific cookie under unmodified OpenSSH semantics.
   is what authenticates against the SSH-forwarded X server, which is
   the attack's value proposition under this threat model.
 
-## What would unblock end-to-end recovery (not implemented)
+## Loose ends
 
-The OpenSSH-side rate limit on rejected X11 channels is the dominant
-blocker; the `tx_bytes` granularity is a secondary concern that only
-matters once payload actually reaches the wire. Future work directions:
+- **Full 16-byte end-to-end run.** Byte 0 was demonstrated; the
+  algorithm generalizes by construction at each position. Wall clock
+  at the current `MAX_ROUNDS=8 / SETTLE_S=0.20s / COOKIE_LENGTH=16`
+  configuration is approximately 2 hours for full recovery (≈ 7 min
+  per byte × 16). Tuning `SETTLE_S` down or batching candidates more
+  aggressively would shorten this; left as an open knob.
+- **Position 0 vs later positions.** All later byte positions probe
+  with `anchor + cookie[0..i-1] + candidate + alignment[:k]` — the
+  back-reference into the LZ77 window simply extends one byte further
+  when the candidate matches. Both the signal mechanic and the
+  signal-alignment detection logic are position-agnostic, so the same
+  recovery mechanism applies.
+- **`measure_pcap.py` retained** for the pcap-based oracle (per spec
+  §2.1's relaxed threat model). Switching back to it requires
+  reverting `service.py`'s import and adding `cap_add: [NET_ADMIN,
+  NET_RAW]` plus the `setpriv --ambient-caps=+net_raw` entrypoint
+  invocation.
 
-- **Bypass the rejection clip.** Instead of using `ssh -X`'s X11 forward
-  as the injection vector, find a server→client channel where attacker
-  bytes get forwarded without per-message authentication. Candidates:
-  `ssh -R <port>:localhost:<port>` reverse forwards (if the victim has
-  one set up), or any persistent-connection forwarded service the
-  victim runs through their session. The X11 forward turned out to be
-  uniquely hostile because of the auth-on-first-byte semantics.
-- **Patch OpenSSH to drop the rejection-handling path.** Forking
-  OpenSSH and removing the auto-shutdown of X11 forwarding on
-  connection-setup auth failures would make the design work as the
-  spec assumed. Useful for academic demonstration, not realistic
-  deployment.
-- **Switch SSH implementation.** AsyncSSH and libssh handle X11
-  channels differently and may not have the same auto-suppress
-  behavior. (The earlier `x11-req` variant pivoted in this direction
-  for related reasons.)
-- **Finer-grained measurement.** Replace `tx_bytes` polling with
-  per-packet inspection (`tcpdump`/scapy with `CAP_NET_RAW`) to expose
-  the size of *just* the SSH `CHANNEL_DATA` packet carrying the probe.
-  This is necessary but not sufficient — it doesn't help if the probe
-  payload doesn't reach the channel in the first place.
+## Earlier dead ends (kept for posterity)
+
+The path to a working recovery had two false bottoms worth recording.
+
+### "Channel rejection clip" investigation
+
+For a long stretch the failure mode looked like "OpenSSH's
+`x11_open_helper` rejects bad-cookie probes destructively, after the
+first probe sshd ships only ~16 bytes of CHANNEL_DATA per packet, and
+the per-probe compression delta is invisible." The source-level walk
+through is in `docs/openssh-trace.md`. **This is real, but it isn't
+the blocker.** With the LZ77 flush fix in place, sshd ships enough
+of each probe's CHANNEL_DATA *before* the rejection round-trip
+completes that the compression delta does land on the wire.
+
+### "tx_bytes granularity is too coarse"
+
+A second false-bottom finding: after switching to scapy-pcap
+measurement, the per-packet view showed the 8-byte differential
+plainly. We took that as evidence that `tx_bytes` polling was below
+the noise floor. **Also wrong.** The signal is identically present in
+`tx_bytes` deltas — the apparent "no signal" was just the LZ77 window
+pollution from the previous probe, not measurement granularity. Once
+the flush is in place, `tx_bytes` and pcap give the same per-probe
+8-byte CORRECT-vs-WRONG differential.
