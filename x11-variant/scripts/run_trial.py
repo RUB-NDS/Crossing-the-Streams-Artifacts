@@ -65,18 +65,21 @@ def capture_ground_truth() -> tuple[bytes, int]:
         raise SystemExit(f"unexpected cookie length: {len(cookie)} bytes")
 
     # Discover the listener port. ss output line:
-    # "LISTEN 0 128 127.0.0.1:6010 0.0.0.0:* users:(("sshd",pid=...,fd=...))"
-    proc = docker_exec_in("server", "victim", "ss", "-tlnp")
+    # "LISTEN 0 128 127.0.0.1:6010 0.0.0.0:*"
+    # (ownership/users column is empty when sshd's per-session forward
+    # listener isn't introspectable from a non-root caller; that's fine —
+    # the loopback :60NN listener is unambiguously the X11 forward.)
+    proc = docker_exec_in("server", "victim", "ss", "-tln")
     port = None
     for line in proc.stdout.splitlines():
-        m = re.search(r"127\.0\.0\.1:(\d+)\s+0\.0\.0\.0:\*.*sshd", line)
+        m = re.search(r"127\.0\.0\.1:(\d+)\s+0\.0\.0\.0:\*", line)
         if m:
             p = int(m.group(1))
             if 6010 <= p <= 6100:
                 port = p
                 break
     if port is None:
-        raise SystemExit("no X11 forward listener found in ss -tlnp output")
+        raise SystemExit("no X11 forward listener found in ss -tln output")
     return cookie, port
 
 
