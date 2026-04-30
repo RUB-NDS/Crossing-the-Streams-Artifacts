@@ -169,6 +169,14 @@ stdev over the `total_guesses` field of passing trials.
   `benchmark.py` distinguishing rc=1 (algorithmic miss; bump
   `min_margin` and retry) from rc=2 (technical/infrastructure failure;
   abort entire sweep). Don't muddle the two.
+- **`evaluation/` is curated, not raw sweep output.** A fresh
+  `scripts/sweep_min_margin.sh` run writes to
+  `results/{OPTIMIZATION}/benchmark_*_{scenario}_mmN.{json,csv}`
+  (optimization-first). The committed Table-2 dataset is at
+  `evaluation/{scenario}/{optimization}/benchmark_*_{scenario}_mmN.{json,csv}`
+  (scenario-first). If you re-run the sweep, don't dump straight into
+  `evaluation/`: it'll mix layouts and clobber whichever rows the paper
+  cites. Land new runs under `results/` and reorganise deliberately.
 
 ## File -> purpose quick reference
 
@@ -197,3 +205,9 @@ stdev over the `total_guesses` field of passing trials.
 - `scripts/stats.py` -- summary stats over a `benchmark_results.json`.
 - `scripts/verify_*.py` -- per-scenario preconditions + one `hunter2`
   recovery end-to-end.
+- `evaluation/{scenario}/{optimization}/` -- committed Table 2 dataset.
+  One `(benchmark_results_*.json, benchmark_summary_*.csv)` pair per
+  `min_margin` step the sweep walked through; the highest-`mmN` pair is
+  the converged 100 %-recovery run. Browser has no `no/` or `ce/`
+  subtree (no fixed-alignment target). Feed any `benchmark_results_*.json`
+  to `scripts/stats.py` for per-cell mean/median/stdev.

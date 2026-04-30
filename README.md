@@ -78,6 +78,19 @@ detail) and `benchmark_summary.csv` (per-`(scenario, optimization)`
 aggregates). `scripts/stats.py` prints a mean / median / stdev summary
 from a results file.
 
+The results that back Table 2 in the paper are checked in under
+`evaluation/`, organised as
+`evaluation/{scenario}/{optimization}/benchmark_{results,summary}_{scenario}_mmN.{json,csv}`.
+Each directory holds the full commit-margin sweep history that
+`scripts/sweep_min_margin.sh` walked through for that
+`(scenario, optimization)` pair — one `(results.json, summary.csv)`
+pair per `min_margin` step (`mmN`), up to and including the step that
+reached 100 % recovery. `evaluation/browser/{no,ce}/` are absent by
+design (the fixed-alignment optimisations have no `--fixed-al` target
+for the browser scenario). Run `scripts/stats.py` against any
+`benchmark_results_*.json` under `evaluation/` to reproduce the per-cell
+summary statistics.
+
 
 ## Repository layout
 
@@ -86,6 +99,9 @@ README.md                          — this file
 docker-compose.yml                 — five services on the sshpoc bridge
 docker-compose.bench.yml           — overlay for N parallel benchmark stacks
 keys/                              — Ed25519 host + client keys (generated)
+evaluation/                        — Table 2 sweep outputs, one tree per
+                                     (scenario, optimization), one file
+                                     pair per min_margin step
 scripts/
     keygen.sh                      — one-shot ssh-keygen wrapper
     pin-hosts.sh                   — /etc/hosts pinning at container start
