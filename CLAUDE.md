@@ -196,18 +196,5 @@ stdev over the `total_guesses` field of passing trials.
   launcher (navigates to the attacker-served exploit page), ansible
   runner.
 - `scripts/benchmark.py` -- multi-stack scenario harness;
-  `SCENARIO_PRESETS` is the single source of truth for the preset
+  `OPTIMIZATION_PRESETS` is the single source of truth for the preset
   toggle combinations.
-- `scripts/sweep_min_margin.sh` -- min-margin sweep that drives
-  `benchmark.py` per (scenario, optimization). Exit-code contract above.
-- `scripts/pin-hosts.sh` -- DNS-pinning entrypoint shared by the
-  attacker / client / server images.
-- `scripts/stats.py` -- summary stats over a `benchmark_results.json`.
-- `scripts/verify_*.py` -- per-scenario preconditions + one `hunter2`
-  recovery end-to-end.
-- `evaluation/{scenario}/{optimization}/` -- committed Table 2 dataset.
-  One `(benchmark_results_*.json, benchmark_summary_*.csv)` pair per
-  `min_margin` step the sweep walked through; the highest-`mmN` pair is
-  the converged 100 %-recovery run. Browser has no `no/` or `ce/`
-  subtree (no fixed-alignment target). Feed any `benchmark_results_*.json`
-  to `scripts/stats.py` for per-cell mean/median/stdev.
