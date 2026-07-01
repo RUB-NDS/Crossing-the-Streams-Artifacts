@@ -150,8 +150,11 @@ def http(
     return json.loads(raw) if raw else {}
 
 
-def _compose(project: str, *args: str, capture: bool = False) -> subprocess.CompletedProcess:
+def _compose(project: str, *args: str, capture: bool = False,
+             extra_env: dict | None = None) -> subprocess.CompletedProcess:
     env = {**os.environ, "COMPOSE_PROJECT_NAME": project}
+    if extra_env:
+        env.update(extra_env)
     cmd = ["docker", "compose", *COMPOSE_FILES, *args]
     return subprocess.run(
         cmd, env=env, check=True,
@@ -169,8 +172,8 @@ def build_images(project: str) -> None:
     print("[build] done", flush=True)
 
 
-def up_stack(project: str) -> None:
-    _compose(project, "up", "-d")
+def up_stack(project: str, extra_env: dict | None = None) -> None:
+    _compose(project, "up", "-d", extra_env=extra_env)
 
 
 def down_stack(project: str) -> None:
@@ -457,13 +460,21 @@ def worker(
     failures: list[str],
     stop_event: threading.Event,
     attacker_bases: list[str],
+    stack_ports: dict | None = None,
 ) -> None:
     tag = f"[stack {stack_idx:02d} {project:<{project_width}}]"
     try:
-        attacker_ip = inspect_ip(f"{project}-attacker")
-        client_ip = inspect_ip(f"{project}-client")
-        attacker_base = f"http://{attacker_ip}:9000"
-        client_base = f"http://{client_ip}:8000"
+        if stack_ports is not None:
+            # --host-ports: reach each stack via its published 127.0.0.1 port
+            # (bridge IPs are not host-routable under rootless Docker / Desktop).
+            att_port, cli_port = stack_ports[project]
+            attacker_base = f"http://127.0.0.1:{att_port}"
+            client_base = f"http://127.0.0.1:{cli_port}"
+        else:
+            attacker_ip = inspect_ip(f"{project}-attacker")
+            client_ip = inspect_ip(f"{project}-client")
+            attacker_base = f"http://{attacker_ip}:9000"
+            client_base = f"http://{client_ip}:8000"
         with results_lock:
             attacker_bases.append(attacker_base)
         need_browser = "browser" in scenarios
@@ -703,6 +714,19 @@ def main() -> int:
                          "failure (e.g. --max-retries 2 = up to 3 attempts). "
                          "Used by sweep_min_margin.sh to absorb transient "
                          "noise before bumping min_margin.")
+    ap.add_argument("--host-ports", action="store_true",
+                    help="reach each stack via a published 127.0.0.1 host port "
+                         "instead of its docker-bridge IP. REQUIRED under "
+                         "rootless Docker and Docker Desktop, where bridge IPs "
+                         "are not host-routable (the default bridge-IP mode "
+                         "hangs at readiness there). Adds "
+                         "docker-compose.bench-ports.yml to the overlay stack.")
+    ap.add_argument("--attacker-port-base", type=int, default=19000,
+                    help="with --host-ports: stack i's attacker is published on "
+                         "127.0.0.1:(base+i) (default base 19000).")
+    ap.add_argument("--client-port-base", type=int, default=18000,
+                    help="with --host-ports: stack i's client is published on "
+                         "127.0.0.1:(base+i) (default base 18000).")
     args = ap.parse_args()
 
     scenarios = [s.strip() for s in args.scenarios.split(",") if s.strip()]
@@ -722,9 +746,10 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    # The PNA Chromium is heavy; only launch it on the client when browser_pna
-    # is in scope (see client.py LAUNCH_CHROMIUM). Propagated to `docker compose`
-    # via the environment inherited by _compose().
+    # Launch only the browser(s) the selected scenarios need (both are heavy;
+    # see client.py LAUNCH_FIREFOX / LAUNCH_CHROMIUM). Propagated to
+    # `docker compose` via the environment inherited by _compose().
+    os.environ["LAUNCH_FIREFOX"] = "1" if "browser" in scenarios else "0"
     os.environ["LAUNCH_CHROMIUM"] = "1" if "browser_pna" in scenarios else "0"
 
     if args.config:
@@ -762,6 +787,18 @@ def main() -> int:
     ]
     projects = [f"{args.prefix}-{i}" for i in range(args.stacks)]
 
+    # --host-ports: publish each stack on a unique 127.0.0.1 port and dial that
+    # (rootless Docker / Docker Desktop don't route bridge IPs from the host).
+    stack_ports: dict | None = None
+    if args.host_ports:
+        COMPOSE_FILES.extend(
+            ["-f", os.path.join(ROOT, "docker-compose.bench-ports.yml")]
+        )
+        stack_ports = {
+            projects[i]: (args.attacker_port_base + i, args.client_port_base + i)
+            for i in range(args.stacks)
+        }
+
     assignments: list[list[int]] = [[] for _ in range(args.stacks)]
     for i in range(args.trials):
         assignments[i % args.stacks].append(i)
@@ -783,6 +820,12 @@ def main() -> int:
         print(f"  max_retries   : {args.max_retries} "
               f"(up to {1 + args.max_retries} attempts per password)")
     print(f"  projects      : {projects[:4]}{' ...' if len(projects) > 4 else ''}")
+    if stack_ports is not None:
+        print(f"  reach stacks  : 127.0.0.1 host ports "
+              f"(attacker {args.attacker_port_base}+i, "
+              f"client {args.client_port_base}+i) [--host-ports]")
+    else:
+        print(f"  reach stacks  : docker-bridge IPs (rootful Docker on Linux)")
     print(f"  per-stack load: {[len(a) for a in assignments][:8]}"
           f"{' ...' if args.stacks > 8 else ''}")
     print(f"  first 5 pws   : {passwords[:5]}")
@@ -803,7 +846,14 @@ def main() -> int:
             for p in projects:
                 def _up(project=p) -> None:
                     try:
-                        up_stack(project)
+                        env = None
+                        if stack_ports is not None:
+                            att_port, cli_port = stack_ports[project]
+                            env = {
+                                "ATTACKER_HOST_PORT": str(att_port),
+                                "CLIENT_HOST_PORT": str(cli_port),
+                            }
+                        up_stack(project, extra_env=env)
                         print(f"[{project}] up", flush=True)
                     except subprocess.CalledProcessError as exc:
                         up_errors.append(f"{project}: {exc}")
@@ -837,7 +887,7 @@ def main() -> int:
                       args.alphabet, config_override, args.early_exit,
                       args.seed_len, args.max_retries,
                       results, results_lock, failures,
-                      stop_event, attacker_bases),
+                      stop_event, attacker_bases, stack_ports),
                 daemon=True,
             )
             t.start()

@@ -1,0 +1,31 @@
+# Rootless-Docker / Docker-Desktop benchmark overlay.
+#
+# Under rootless Docker (and inside Docker Desktop's VM), container bridge IPs
+# live in the engine's own network namespace and are NOT routable from the
+# host, so the default bench overlay's "discover the bridge IP and dial it"
+# approach hangs at readiness. This overlay instead PUBLISHES each stack's
+# attacker (:9000) and client (:8000) on a unique host port bound to
+# 127.0.0.1, which RootlessKit / Docker Desktop forward to the host.
+# scripts/benchmark.py --host-ports selects this overlay and dials
+# 127.0.0.1:<port> instead of the bridge IP.
+#
+# Host ports come from ATTACKER_HOST_PORT / CLIENT_HOST_PORT, which
+# benchmark.py sets per stack at `up` time. They default to 0 (an ephemeral
+# port) so that `docker compose build` / `down` -- which never set them -- still
+# parse cleanly; only `up` (which sets real values) actually publishes.
+#
+# Applied ON TOP OF docker-compose.bench.yml, so its `ports: !override []` is
+# replaced by these published ports.
+#
+# Usage (driven automatically by benchmark.py --host-ports):
+#   ATTACKER_HOST_PORT=19000 CLIENT_HOST_PORT=18000 COMPOSE_PROJECT_NAME=bench-0 \
+#     docker compose -f docker-compose.yml -f docker-compose.bench.yml \
+#                    -f docker-compose.bench-ports.yml up -d
+
+services:
+  attacker:
+    ports: !override
+      - "127.0.0.1:${ATTACKER_HOST_PORT:-0}:9000"
+  client:
+    ports: !override
+      - "127.0.0.1:${CLIENT_HOST_PORT:-0}:8000"

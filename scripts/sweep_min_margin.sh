@@ -25,6 +25,12 @@
 #                                   recording it as a true failure
 #                                   (default = 3 attempts per password).
 #                                   Absorbs transient noise before bumping mm.
+#   HOST_PORTS       (default 0)    if 1, pass --host-ports to benchmark.py so
+#                                   each stack is reached via a published
+#                                   127.0.0.1 port instead of its bridge IP.
+#                                   REQUIRED under rootless Docker / Docker
+#                                   Desktop (bridge IPs aren't host-routable
+#                                   there). Use a smaller STACKS there.
 #
 # Notes:
 #   - browser and browser_pna are skipped for the fixed_single optimizations
@@ -67,6 +73,7 @@ MM_STEP="${MM_STEP:-8}"
 MM_MAX="${MM_MAX:-128}"
 EARLY_EXIT="${EARLY_EXIT:-1}"
 MAX_RETRIES="${MAX_RETRIES:-2}"
+HOST_PORTS="${HOST_PORTS:-0}"
 
 OPTIMIZATIONS=(NO FS AS CE FSCE ASCE)
 SCENARIOS=(direct browser browser_pna ansible)
@@ -114,6 +121,9 @@ for optimization in "${OPTIMIZATIONS[@]}"; do
             ee_args=()
             if [ "$EARLY_EXIT" = "1" ]; then
                 ee_args+=(--early-exit)
+            fi
+            if [ "$HOST_PORTS" = "1" ]; then
+                ee_args+=(--host-ports)
             fi
             python3 -u scripts/benchmark.py \
                 --stacks "$STACKS" \

@@ -624,6 +624,11 @@ class SSHState:
             headless=True,
             args=[
                 "--no-sandbox",
+                # Chromium's default /dev/shm is 64 MiB in a container, which it
+                # can exhaust under many parallel benchmark stacks and hang;
+                # spill shared memory to /tmp instead. Infra only -- unrelated
+                # to PNA/CORS/web-security enforcement.
+                "--disable-dev-shm-usage",
                 "--enable-features=PrivateNetworkAccessRespectPreflightResults",
             ],
         )
@@ -866,10 +871,17 @@ async def main() -> int:
     await site.start()
     LOG.info("HTTP control API listening on 0.0.0.0:%d", HTTP_PORT)
 
-    try:
-        await state.launch_browser()
-    except Exception as exc:  # noqa: BLE001
-        LOG.warning("browser launch failed (browser scenario unavailable): %s", exc)
+    # Firefox (browser scenario) is gated by LAUNCH_FIREFOX (default on).
+    # benchmark.py sets it to 0 for runs that don't include `browser`, so a
+    # browser_pna sweep doesn't launch -- and block on -- an unused Firefox
+    # (launch_browser is awaited before launch_chromium below).
+    if os.environ.get("LAUNCH_FIREFOX", "1") != "0":
+        try:
+            await state.launch_browser()
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("browser launch failed (browser scenario unavailable): %s", exc)
+    else:
+        LOG.info("LAUNCH_FIREFOX=0: skipping Firefox (browser scenario unavailable)")
 
     # The PNA Chromium is only needed for the browser_pna scenario. Launching it
     # on every stack roughly doubles per-container browser memory/CPU and eats

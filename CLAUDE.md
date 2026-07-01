@@ -154,7 +154,14 @@ the `docker-compose.bench.yml` overlay, which:
 - Project-scopes every `container_name` using `${COMPOSE_PROJECT_NAME}`.
 - Drops host port mappings (`ports: !override []`) -- the benchmark
   script dials each attacker / client directly on their docker-bridge
-  IPs, discovered via `docker inspect`.
+  IPs, discovered via `docker inspect`. This is the default and works
+  under **rootful Docker on Linux**, where bridge IPs are host-routable.
+  Under **rootless Docker or Docker Desktop** the bridge IPs are *not*
+  host-routable (they live in the engine's netns), so the poll hangs at
+  readiness; pass `benchmark.py --host-ports` (or `HOST_PORTS=1` to the
+  sweep) to instead publish each stack on a unique `127.0.0.1` port (via
+  the `docker-compose.bench-ports.yml` overlay) and dial that. Use a
+  smaller `--stacks` there.
 - Tags images under `ssh-compression-poc-bench/<service>:latest` so
   `docker compose build` runs once and subsequent `up`s reuse it.
 

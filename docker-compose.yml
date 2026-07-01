@@ -116,9 +116,11 @@ services:
       - ANSIBLE_TUNNEL_DEST_HOST=redis
       - ANSIBLE_TUNNEL_DEST_PORT=6379
       - SUDO_SECRET_VALUE=hunter2
-      # Launch the PNA Chromium (browser_pna scenario). Default on so the
-      # default stack and verify_browser_pna work; benchmark.py sets this to 0
-      # for runs that don't include browser_pna to save browser memory/CPU.
+      # Which browsers the client launches. Default on so the default stack and
+      # all verify_*.py work; benchmark.py sets each to 0 when its scenario
+      # isn't in scope, so a sweep launches only the browser it needs (saves
+      # memory/CPU and avoids the unused browser blocking the needed one).
+      - LAUNCH_FIREFOX=${LAUNCH_FIREFOX:-1}
       - LAUNCH_CHROMIUM=${LAUNCH_CHROMIUM:-1}
     ports:
       - "8000:8000"

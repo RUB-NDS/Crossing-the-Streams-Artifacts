@@ -78,6 +78,20 @@ python scripts/benchmark.py \
     --optimization ASCE
 ```
 
+**Rootless Docker / Docker Desktop:** the benchmark reaches each parallel
+stack on its docker-bridge IP, which is only host-routable under **rootful
+Docker on Linux**. Under rootless Docker or Docker Desktop those IPs live
+in the engine's network namespace and the run hangs at "waiting for
+readiness". Add `--host-ports` (benchmark) or `HOST_PORTS=1` (sweep) to
+publish each stack on a unique `127.0.0.1` port instead, and use a smaller
+`--stacks` / `STACKS`:
+
+```bash
+python scripts/benchmark.py --host-ports --stacks 4 --trials 100 \
+    --scenarios browser_pna --optimization FSCE
+HOST_PORTS=1 STACKS=4 scripts/sweep_min_margin.sh
+```
+
 `scripts/benchmark.py` writes `benchmark_results.json` (per-trial
 detail) and `benchmark_summary.csv` (per-`(scenario, optimization)`
 aggregates). `scripts/stats.py` prints a mean / median / stdev summary
