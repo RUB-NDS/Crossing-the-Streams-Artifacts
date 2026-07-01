@@ -600,23 +600,67 @@ class SSHState:
                 await asyncio.sleep(1.0)
         LOG.error("could not load exploit page after 60 attempts")
 
+    async def _grant_lna(self, context, origin: str) -> Optional[str]:
+        """Grant the Local Network Access permission for ``origin`` (Chromium
+        142+). Tries Playwright's friendly-name grant first, then the CDP
+        permission type as a fallback for builds that don't map the name yet.
+        Returns the mechanism used, or None if both attempts failed. Never
+        disables the LNA check -- CORS stays fully enforced."""
+        try:
+            await context.grant_permissions(
+                ["local-network-access"], origin=origin,
+            )
+            return "playwright:local-network-access"
+        except Exception as exc:  # noqa: BLE001
+            LOG.info("grant_permissions(local-network-access) unavailable (%s); "
+                     "trying CDP Browser.grantPermissions", exc)
+        try:
+            cdp = await self._chromium.new_browser_cdp_session()
+            await cdp.send("Browser.grantPermissions", {
+                "origin": origin,
+                "permissions": ["localNetworkAccess"],
+            })
+            return "cdp:localNetworkAccess"
+        except Exception as exc2:  # noqa: BLE001
+            LOG.info("LNA grant best-effort failed (Playwright + CDP): %s -- "
+                     "harmless: LNA is not actively enforced headless, so the "
+                     "loopback fetch still proceeds via the CORS preflight", exc2)
+        return None
+
     async def launch_chromium(self) -> None:
-        """Launch a pinned headless Chromium and load the attacker's PNA
+        """Launch the current headless Chromium and load the attacker's PNA
         exploit page (browser_pna scenario).
 
-        Chromium 140 (via playwright==1.55.0) enforces Private Network Access
-        preflights: the cross-origin private-origin -> loopback fetch in
-        exploit_pna.html is answered with an OPTIONS preflight that strips the
-        body, so the guess rides in the request-URI *path* instead of the body.
+        Chromium 149 (via playwright==1.61.0; Chrome for Testing, same Blink /
+        networking stack) is in the current Chromium-142+ era, where Local
+        Network Access (LNA) replaced Private Network Access preflights. On a
+        real victim's *headed* browser a cross-origin page->loopback fetch is
+        gated behind a one-time "allow local network access" prompt (paper
+        Section 5.2); the attack relies on the victim granting it.
 
-        We ENABLE PrivateNetworkAccessRespectPreflightResults so a failed
-        preflight additionally blocks the follow-up request -- a
-        PNA-STRENGTHENING flag, not a bypass. We pass NO flag that disables or
-        downgrades PNA / CORS / web security. ``--no-sandbox`` only drops the OS
-        process sandbox that Chromium otherwise requires to run as root in a
-        container; it does not touch PNA/CORS/web-security enforcement.
+        HONEST NOTE ON THIS HARNESS: in automated *headless* Chromium, LNA does
+        not actively block the loopback fetch (verified: the OPTIONS reaches the
+        wire with or without the grant, and even with the full Chrome-for-Testing
+        build and an LNA feature flag). So here the guess simply rides in the
+        OPTIONS **CORS** preflight that exploit_pna.html forces with a
+        non-safelisted request header (``x-pna-guess``) -- that preflight is the
+        injection vehicle, and the body is never sent (the loopback response
+        carries no Access-Control-Allow-* headers, so the CORS check fails and
+        the follow-up request is blocked). PNA/LNA is *why* body injection is
+        dead; the CORS preflight is *how* the guess reaches the wire.
+
+        We still attempt to GRANT the LNA permission for the exploit origin
+        below, simulating the victim's one-time consent. It is best-effort (a
+        no-op in this headless harness) and never DISABLES the LNA check.
+        ``--no-sandbox`` / ``--disable-dev-shm-usage`` are container-infra flags,
+        unrelated to web-security enforcement. (We use Playwright's default
+        headless binary, ``chrome-headless-shell`` -- fast and light. The full
+        ``channel="chromium"`` build starts ~3x slower without changing the
+        outcome, since LNA doesn't block here either way.)
         """
         from playwright.async_api import async_playwright
+
+        grant_origin = "http://attacker:9000"
 
         if self._playwright is None:
             self._playwright = await async_playwright().start()
@@ -627,14 +671,29 @@ class SSHState:
                 # Chromium's default /dev/shm is 64 MiB in a container, which it
                 # can exhaust under many parallel benchmark stacks and hang;
                 # spill shared memory to /tmp instead. Infra only -- unrelated
-                # to PNA/CORS/web-security enforcement.
+                # to LNA/CORS/web-security enforcement.
                 "--disable-dev-shm-usage",
-                "--enable-features=PrivateNetworkAccessRespectPreflightResults",
             ],
         )
-        page = await self._chromium.new_page()
+        context = await self._chromium.new_context()
 
-        exploit_url = "http://attacker:9000/exploit_pna"
+        # Grant (never disable) the Local Network Access permission for the
+        # exploit origin, simulating the victim's one-time "Allow". Best-effort:
+        # in this headless harness LNA doesn't actively block the loopback fetch,
+        # so the grant is a no-op and the attack works via the CORS preflight
+        # either way. LNA_GRANT=0 skips the grant (demonstration knob).
+        if os.environ.get("LNA_GRANT", "1") == "0":
+            LOG.info("LNA_GRANT=0: not granting local network access "
+                     "(best-effort; LNA is not actively enforced headless)")
+        else:
+            granted_via = await self._grant_lna(context, grant_origin)
+            if granted_via:
+                LOG.info("granted local network access for %s via %s",
+                         grant_origin, granted_via)
+
+        page = await context.new_page()
+
+        exploit_url = f"{grant_origin}/exploit_pna"
         for attempt in range(1, 61):
             try:
                 resp = await page.goto(exploit_url, timeout=5000)

@@ -13,19 +13,18 @@ RUN pip install --no-cache-dir -r requirements.txt
 # managed by Playwright's own manifest -- we let `--with-deps` apt-install them
 # rather than hand-curating a list.
 #
-# Chromium is PINNED via playwright==1.55.0 (client/requirements.txt), which
-# bundles Chromium 140.0.7339.16. This build is chosen deliberately for the
-# browser_pna scenario:
-#   * It is PRE-142, so it has NO Chromium-142 "Local Network Access" one-time
-#     permission prompt (which a headless browser cannot satisfy and would
-#     auto-deny, killing the loopback fetch).
-#   * It implements Private Network Access preflights: a cross-origin
-#     private-origin -> loopback fetch is answered with an OPTIONS preflight
-#     (PrivateNetworkAccessSendPreflights is default-on since M104), which is
-#     exactly the vehicle browser_pna rides the guess in.
-# Do NOT bump Playwright to 1.56+/Chromium 141+ without re-validating: 141 has a
-# staged LNA rollout that can auto-deny loopback in headless, and 142 enforces
-# the prompt. See README.md (browser_pna) and attacker/attack/adapters/browser_pna.py.
+# Chromium for browser_pna is pinned via playwright==1.61.0
+# (client/requirements.txt) -> Chromium 149 (Chrome for Testing; same Blink /
+# networking stack). This is the current Chromium-142+ "Local Network Access"
+# (LNA) era that replaced Private Network Access preflights -- which the paper
+# (Section 5.2) targets. On a real headed browser LNA gates a page->loopback
+# fetch behind a one-time permission prompt; client.py::launch_chromium grants
+# that permission best-effort (simulating the victim's "Allow"). In the
+# automated headless harness LNA does not actively block, so the guess rides in
+# the CORS OPTIONS preflight that exploit_pna.html forces (see launch_chromium /
+# README). Nothing here disables LNA/CORS. We use the default fast headless
+# shell; the full channel="chromium" build starts far slower without changing
+# the outcome.
 RUN playwright install --with-deps firefox chromium \
  && rm -rf /var/lib/apt/lists/*
 

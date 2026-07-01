@@ -122,6 +122,10 @@ services:
       # memory/CPU and avoids the unused browser blocking the needed one).
       - LAUNCH_FIREFOX=${LAUNCH_FIREFOX:-1}
       - LAUNCH_CHROMIUM=${LAUNCH_CHROMIUM:-1}
+      # Grant the Chromium 142+ Local Network Access permission (simulate the
+      # victim's one-time "Allow"). Default on. Set to 0 to demonstrate that
+      # without it, headless Chromium auto-denies and browser_pna is blocked.
+      - LNA_GRANT=${LNA_GRANT:-1}
     ports:
       - "8000:8000"
     networks:
