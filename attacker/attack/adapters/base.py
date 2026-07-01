@@ -1,4 +1,4 @@
-"""Adapter protocol shared by direct, browser, and ansible transports.
+"""Adapter protocol shared by direct, browser, browser_pna, and ansible transports.
 
 The engine asks the adapter for one thing only: given a prefix, candidate,
 and alignment bytes, return the measured c->s byte count for one oracle

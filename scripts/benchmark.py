@@ -1,4 +1,4 @@
-"""Benchmark the three attack scenarios (direct / browser / ansible).
+"""Benchmark the attack scenarios (direct / browser / browser_pna / ansible).
 
 Parallelises N independent docker-compose projects. Each stack is fully
 isolated: its own bridge network, its own containers, its own scapy

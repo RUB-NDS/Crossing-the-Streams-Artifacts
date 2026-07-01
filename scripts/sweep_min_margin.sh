@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sweep min_margin (μ) across {scenario} x {optimization}:
-#   - scenarios:    direct, browser, ansible          (one per benchmark run)
+#   - scenarios:    direct, browser, browser_pna, ansible  (one per bench run)
 #   - optimizations: NO, FS, AS, CE, FSCE, ASCE       (paper Table 2 labels)
 #   - min_margin: start at 8, step +8, stop on first 100%-success run,
 #                 give up after 128.
@@ -27,9 +27,17 @@
 #                                   Absorbs transient noise before bumping mm.
 #
 # Notes:
-#   - browser is skipped for the fixed_single optimizations (NO and CE) -- we
-#     have no fixed_al target for browser.
-#   - browser still runs for FS, AS, FSCE, and ASCE (no --fixed-al needed).
+#   - browser and browser_pna are skipped for the fixed_single optimizations
+#     (NO and CE) -- we have no fixed_al target for either; their noise floor
+#     mandates the full alignment sweep.
+#   - browser and browser_pna still run for FS, AS, FSCE, and ASCE.
+#   - browser_pna uses benchmark.py's defaults (--seed-len 2, so only the
+#     CR/LF-walled {length, pw0, pw1} are seeded). It attacks the default
+#     8-char password, recovering the 6-byte tail; for a result whose recovered
+#     portion is directly comparable to the 8-char browser column, run a
+#     targeted `benchmark.py --scenarios browser_pna --password-length 10`
+#     separately (2 seeded + 8 recovered). browser_pna's higher noise floor may
+#     need MM_MAX raised above the default 128.
 
 set -uo pipefail
 
@@ -61,7 +69,7 @@ EARLY_EXIT="${EARLY_EXIT:-1}"
 MAX_RETRIES="${MAX_RETRIES:-2}"
 
 OPTIMIZATIONS=(NO FS AS CE FSCE ASCE)
-SCENARIOS=(direct browser ansible)
+SCENARIOS=(direct browser browser_pna ansible)
 
 for optimization in "${OPTIMIZATIONS[@]}"; do
     out_dir="results/$optimization"
@@ -73,8 +81,11 @@ for optimization in "${OPTIMIZATIONS[@]}"; do
     fi
 
     for scenario in "${SCENARIOS[@]}"; do
-        if [ "$needs_fixed_al" -eq 1 ] && [ "$scenario" == "browser" ]; then
-            echo "--- skipping optimization=$optimization scenario=browser (no fixed-al target) ---"
+        # The browser-class scenarios (browser, browser_pna) have no fixed_al
+        # target -- their noise floor mandates the full alignment sweep, so the
+        # fixed_single optimizations (NO, CE) are n/a for both.
+        if [ "$needs_fixed_al" -eq 1 ] && [[ "$scenario" == "browser" || "$scenario" == "browser_pna" ]]; then
+            echo "--- skipping optimization=$optimization scenario=$scenario (no fixed-al target; full sweep mandatory) ---"
             continue
         fi
 
