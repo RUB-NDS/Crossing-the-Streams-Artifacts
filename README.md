@@ -10,6 +10,10 @@ section 5:
   forward.
 - **Browser-based injection** (section 5.2) — `navigator.sendBeacon()`
   from a headless Firefox to a loopback-bound port forward.
+- **PNA browser-based injection** (section 5.2, *Restricted Plaintext
+  Injection Oracle in CORS-PNA*) — the same attack under a
+  **PNA-enforcing Chromium**, where the guess rides in an OPTIONS
+  preflight's URL path instead of the request body.
 - **Ansible password recovery** (section 5.3) — a fresh
   `ansible-playbook` run per guess, recovering the sudo password sent
   via `become: yes`.
@@ -32,10 +36,11 @@ describes how to reproduce the artifact.
 # 1. Build the images and bring everything up.
 docker compose up -d --build
 
-# 2. Run the per-scenario verifications. Each recovers "hunter2" end-to-end.
-python scripts/verify_direct.py     # section 5.1, ~2 min
-python scripts/verify_browser.py    # section 5.2, ~17 min
-python scripts/verify_ansible.py    # section 5.3, ~4 min
+# 2. Run the per-scenario verifications.
+python scripts/verify_direct.py       # section 5.1, ~2 min, recovers "hunter2"
+python scripts/verify_browser.py      # section 5.2, ~17 min, recovers "hunter2"
+python scripts/verify_browser_pna.py  # section 5.2 (PNA), seeded {len,pw0,pw1} + real tail
+python scripts/verify_ansible.py      # section 5.3, ~4 min, recovers "hunter2"
 
 # 3. Watch per-byte progress while an attack is running.
 docker compose logs -f attacker
@@ -91,6 +96,23 @@ for the browser scenario). Run `scripts/stats.py` against any
 `benchmark_results_*.json` under `evaluation/` to reproduce the per-cell
 summary statistics.
 
+The `browser_pna` scenario (a reviewer-requested addition, not part of
+the original Table 2) benchmarks the same way; its `NO`/`CE` cells are
+`n/a` for the same noise-floor reason as `browser`. To keep the
+**recovered** portion comparable to the 8-char browser column, target a
+10-char lowercase password (2 seeded + 8 truly recovered):
+
+```bash
+python scripts/benchmark.py \
+    --stacks 4 --trials 100 \
+    --scenarios browser_pna --optimization ASCE \
+    --password-length 10 --seed-len 2
+```
+
+The reported `total_guesses` is the **measured tail** cost; the seeded
+`{length, pw0, pw1}` bootstrap is analytical (see
+`scripts/verify_browser_pna.py`).
+
 
 ## Repository layout
 
@@ -107,6 +129,7 @@ scripts/
     pin-hosts.sh                   — /etc/hosts pinning at container start
     verify_direct.py               — preconditions + hunter2 (direct)
     verify_browser.py              — preconditions + hunter2 (browser)
+    verify_browser_pna.py          — preconditions + seeded/length-bounded (browser_pna)
     verify_ansible.py              — preconditions + hunter2 (ansible)
     benchmark.py                   — multi-stack scenario benchmark
     sweep_min_margin.sh            — commit-margin sweep harness
@@ -115,7 +138,7 @@ server/                            — debian:bookworm-slim + openssh-server
     Dockerfile
     sshd_config
     entrypoint.sh
-client/                            — python:3.14 + openssh-client + Firefox
+client/                            — python:3.14 + openssh-client + Firefox + Chromium
     Dockerfile
     client.py
     requirements.txt
@@ -124,17 +147,19 @@ attacker/
     Dockerfile
     requirements.txt
     mitm.py                        — TCP forwarder + sniffer + /run_attack
-    exploit.html                   — browser-injection exploit page
+    exploit.html                   — Firefox (browser) exploit page
+    exploit_pna.html               — Chromium PNA (browser_pna) exploit page
     attack/                        — attack engine package
         engine.py                  — run_attack, crack_byte_position
         config.py                  — AttackConfig, AlignmentMode
-        alignment.py               — _ALIGNMENT_POOL, make_alignment
+        alignment.py               — _ALIGNMENT_POOL, _URL_SAFE_ALIGNMENT_POOL
         adapters/
             base.py                — Adapter Protocol
             direct.py              — raw-TCP injection
-            browser.py             — browser sendBeacon injection
+            browser.py             — Firefox sendBeacon (body) injection
+            browser_pna.py         — Chromium PNA (URL-path) injection
             ansible.py             — fresh-SSH-per-guess injection
-            browser_bridge.py      — WebSocket bridge for browser scenario
+            browser_bridge.py      — WebSocket bridge for the browser scenarios
         tests/                     — plain-assertion sanity tests
 ```
 
@@ -173,7 +198,7 @@ in-the-middle attempt would be detected at the SSH layer.
 
 | Method | Path                   | Description                                                                                                  |
 | :----- | :--------------------- | :----------------------------------------------------------------------------------------------------------- |
-| GET    | `/status`              | SSH state, negotiated algorithms, port-forward state, browser state.                                         |
+| GET    | `/status`              | SSH state, negotiated algorithms, port-forward state, Firefox + PNA-Chromium state.                          |
 | POST   | `/send_secret`         | Opens a fresh redis-py connection through the tunnel; `AUTH default <password>` hits the wire.               |
 | POST   | `/set_secret`          | `{"value": "..."}` — reconfigures the Redis password and reconnects SSH.                                     |
 | POST   | `/reset`               | Tear down and re-open the SSH connection.                                                                    |
@@ -189,17 +214,21 @@ in-the-middle attempt would be detected at the SSH layer.
 | POST   | `/clear_log`       | Reset the packet log.                                                                        |
 | POST   | `/trigger_secret`  | Convenience: proxies to client `/send_secret`.                                               |
 | POST   | `/trigger_payload` | Writes a raw payload through the client's Redis tunnel.                                      |
-| GET    | `/exploit`         | Serves the browser-injection exploit page.                                                   |
-| GET    | `/ws`              | WebSocket endpoint for the victim's browser.                                                 |
+| GET    | `/exploit`         | Serves the Firefox (`browser`) exploit page.                                                 |
+| GET    | `/exploit_pna`     | Serves the Chromium PNA (`browser_pna`) exploit page.                                        |
+| GET    | `/ws`              | WebSocket endpoint for the victim's Firefox (`browser`).                                     |
+| GET    | `/ws_pna`          | WebSocket endpoint for the victim's Chromium (`browser_pna`).                                |
 | POST   | `/run_attack`      | Unified attack endpoint — dispatches on `scenario`.                                          |
 | POST   | `/cancel`          | Set the cancel-event so an in-flight `/run_attack` returns at the next position boundary.    |
+| POST   | `/pna_probe`       | Test-harness probe: fire PNA preflight(s) and return the block + c→s wire evidence.          |
+| POST   | `/pna_measure`     | Test-harness diagnostic: run one `browser_pna` `measure_once` and return the raw c→s bytes.  |
 
 `/run_attack` request body (all `config` fields are optional; omitted
 fields fall back to the adapter's `default_config()`):
 
 ```json
 {
-  "scenario": "direct | browser | ansible",
+  "scenario": "direct | browser | browser_pna | ansible",
   "config": {
     "known_prefix":             "...",
     "alphabet":                 "abcdefghijklmnopqrstuvwxyz0123456789",
@@ -246,6 +275,86 @@ async def measure_once(prefix, candidate, alignment) -> int  # wire-byte count
 JSON overrides on top of an adapter-supplied `default_config()`.
 
 
+## The `browser_pna` scenario (PNA)
+
+The `browser_pna` scenario is the additive sibling of `browser` that
+runs the attack under a **PNA-enforcing Chromium** instead of Firefox.
+A PNA (Private Network Access) browser answers the cross-origin
+private→loopback `fetch()` with an **OPTIONS preflight that strips the
+request body**, so the guess cannot ride in the body. Instead it rides
+in the preflight's **request-URI path**. Everything else — the shared
+compression oracle, the alignment sweep, the measurement machinery — is
+unchanged.
+
+**The CR/LF wall.** A browser will not emit `\r`/`\n` verbatim in a URL
+path, and percent-encoding a byte changes the wire bytes (destroying the
+LZ77 match). The Redis secret is framed `…default\r\n$<len>\r\n<pw>\r\n`,
+and DEFLATE's minimum match is 3 bytes, so:
+
+| Target       | Left context in the buffer      | Leakable? |
+| :----------- | :------------------------------ | :-------- |
+| length, pw0  | needs `\r\n` in the left context | **no**   |
+| pw1          | only 1 injectable anchor byte    | **no**   |
+| pw2 … pw(n-1)| `pw0 pw1 …` (all URL-safe)        | **yes**  |
+
+So `{length, pw0, pw1}` sit behind the CR/LF wall. In this PoC they are
+**seeded** (the sole sanctioned shortcut, confined to exactly the
+un-leakable bytes); their real-attack brute-force cost is `O(A²)–O(A³)`
+for the leading pair plus a bounded length search, reported
+**analytically** by `scripts/verify_browser_pna.py` alongside the
+measured tail guess count. The tail `pw2 … pw(n-1)` is recovered for
+real, byte by byte, through the live preflight oracle. Recovery is
+**length-bounded** (the trailing `\r` can't be injected either, so
+`terminator=b""` and `max_length` bounds the loop).
+
+**Load-bearing constants** (all in `browser_pna.py` / `alignment.py`,
+derived and validated for the URL-path/OPTIONS vehicle):
+
+- **URL-safe alignment pool** `_URL_SAFE_ALIGNMENT_POOL` = uppercase
+  `A..H`. The classic `0x80..0x8F` pool cannot appear in a URL path
+  without percent-encoding. Every byte is URL-path-verbatim, an 8-bit
+  static-Huffman literal, mutually distinct, and disjoint from the
+  recovery alphabet and the flush pool.
+- **Disjoint flush pool** `flush_pool="url_safe_disjoint"` = uppercase
+  `I..Z`. Because the injectable anchor at pw2 is only 2 bytes, the flush
+  and prefill are drawn from bytes that are URL-safe **and** disjoint
+  from the recovery alphabet (lowercase + digits), so a 3-byte candidate
+  run can only match the password site. (`%` is deliberately excluded —
+  it can absorb the next two bytes on the wire.)
+- **Seeded bootstrap boundary** = exactly `{length, pw0, pw1}`. Seeding
+  past pw1 is an unsanctioned shortcut.
+- **Small prefill** `guess_prefill_bytes ≈ 2048` — *not* the Firefox
+  scenario's 16384. The Firefox variant injects the full ~30-byte
+  framing as the anchor, whose long LZ77 match still compresses at a
+  16 KiB prefill distance. Behind the CR/LF wall the injectable anchor
+  is only 2 bytes (a **3-byte match**), which saves compressed bits over
+  3 literals *only at a short distance*. A large prefill pushes the
+  buffered secret out of match range and the signal vanishes; the
+  correct candidate is cleanly cheapest around 512–2048 bytes of prefill
+  and gone by ~8 KiB. The prefill is drawn **randomly** (not constant):
+  the guess is not isolated in a static-Huffman block (HTTP framing
+  follows it in the request line), so a constant prefill would freeze a
+  per-candidate dynamic-Huffman bias and a wrong candidate would win;
+  a random prefill averages that bias away across rounds. This is a
+  browser-class noise floor, so outlier filtering is off and the commit
+  margin is swept up to 100 % recovery.
+
+**Pinned Chromium.** The client launches a **pinned Chromium 140**
+(via `playwright==1.55.0`) — pre-142, so it has no Local Network Access
+permission prompt (which a headless browser would auto-deny) but does
+send PNA preflights. It runs with
+`--enable-features=PrivateNetworkAccessRespectPreflightResults` (which
+**strengthens** PNA, blocking the request when the preflight fails) and
+`--no-sandbox` (the container OS sandbox only). **No** flag disables or
+downgrades PNA/CORS/web security; the whole point is that PNA is
+enforced and the attack works anyway through the path.
+
+`scripts/verify_browser_pna.py` asserts, via the attacker's `/pna_probe`
+endpoint, that a genuine preflight is **blocked** and that the c→s SSH
+wire volume **scales with the path length** — evidence the guess bytes
+traverse the forward inside the OPTIONS preflight, not a body.
+
+
 ## Tests
 
 ```bash
@@ -254,6 +363,8 @@ python -m attacker.attack.tests.test_engine_expected
 python -m attacker.attack.tests.test_alignment
 python -m attacker.attack.tests.test_config
 python -m attacker.attack.tests.test_fork
+python -m attacker.attack.tests.test_url_safe_alignment
+python -m attacker.attack.tests.test_pna_path_builder
 ```
 
 These are pure-logic unit tests that run on the host without the
@@ -266,12 +377,15 @@ docker-compose stack. End-to-end correctness is verified by the
 - `attacker/` and `client/` sources are `COPY`'d into the images at
   build time, not bind-mounted: rebuild the relevant service after
   edits (`docker compose build attacker && docker compose up -d attacker`).
-- The alignment-data pool (`0x80..0x8F`), the per-scenario
-  `min_margin`, `flush_bytes=32768` (the zlib LZ77 window size),
-  `guess_prefill_bytes=16384`
-  (browser scenario only), and the adapter-specific ordering are
-  load-bearing. They are documented in the paper (sections 4 and 5)
-  and in the adapter docstrings.
+- The alignment-data pool (`0x80..0x8F`, or the URL-safe `A..H` pool for
+  `browser_pna`), the per-scenario `min_margin`, `flush_bytes=32768` (the
+  zlib LZ77 window size), `guess_prefill_bytes` (browser / browser_pna),
+  the `browser_pna` disjoint flush pool and seeded `{length, pw0, pw1}`
+  boundary, the pinned Chromium 140 (`playwright==1.55.0`, pre-142), and
+  the adapter-specific ordering are load-bearing. They are documented in
+  the paper (sections 4, 5, 7.1), the "The `browser_pna` scenario"
+  section above, and the adapter docstrings. **Never** pass a flag that
+  disables or downgrades PNA/CORS for `browser_pna`.
 - The 8-byte alignment sweep (`alignment_lengths=[0..7]`) assumes
   ChaCha20-Poly1305's padding granularity. AES-CTR + HMAC-ETM would
   require `[0..15]`. The negotiated cipher is visible at

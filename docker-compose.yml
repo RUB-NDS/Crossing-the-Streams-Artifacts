@@ -116,6 +116,10 @@ services:
       - ANSIBLE_TUNNEL_DEST_HOST=redis
       - ANSIBLE_TUNNEL_DEST_PORT=6379
       - SUDO_SECRET_VALUE=hunter2
+      # Launch the PNA Chromium (browser_pna scenario). Default on so the
+      # default stack and verify_browser_pna work; benchmark.py sets this to 0
+      # for runs that don't include browser_pna to save browser memory/CPU.
+      - LAUNCH_CHROMIUM=${LAUNCH_CHROMIUM:-1}
     ports:
       - "8000:8000"
     networks:

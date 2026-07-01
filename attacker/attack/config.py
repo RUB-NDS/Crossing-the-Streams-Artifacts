@@ -41,7 +41,7 @@ class AttackConfig:
     outlier_threshold: int
 
     flush_bytes: int
-    flush_pool: Literal["secrets_random", "high_ascii", "none"]
+    flush_pool: Literal["secrets_random", "high_ascii", "none", "url_safe_disjoint"]
     measurement_min_segment_size: int
 
     candidate_fork_on_stall: bool = False
@@ -49,6 +49,14 @@ class AttackConfig:
     max_fork_depth: int = 2
 
     guess_prefill_bytes: int = 0
+
+    # Byte pool the engine draws alignment-data bytes from (via
+    # alignment.make_alignment). None => the classic high-ASCII pool
+    # (alignment._ALIGNMENT_POOL), which every existing scenario relies on.
+    # The browser_pna scenario overrides this with a URL-path-safe pool
+    # (alignment._URL_SAFE_ALIGNMENT_POOL) because its alignment bytes ride in
+    # an OPTIONS request-URI path where 0x80..0x8F cannot appear verbatim.
+    alignment_pool: bytes | None = None
 
     expected: bytes | None = None
 

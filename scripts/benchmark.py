@@ -195,6 +195,7 @@ def wait_ready(
     attacker_base: str,
     client_base: str,
     need_browser: bool,
+    need_browser_pna: bool = False,
     timeout: float = 240.0,
 ) -> None:
     deadline = time.time() + timeout
@@ -208,8 +209,12 @@ def wait_ready(
                 cs.get("port_forwards", {}).get("redis_tunnel", {}).get("active")
             )
             browser_ok = bool(cs.get("browser_connected"))
-            last = f"ssh={ssh_ok} redis_tunnel={redis_ok} browser={browser_ok}"
-            if ssh_ok and redis_ok and (not need_browser or browser_ok):
+            browser_pna_ok = bool(cs.get("browser_pna_connected"))
+            last = (f"ssh={ssh_ok} redis_tunnel={redis_ok} "
+                    f"browser={browser_ok} browser_pna={browser_pna_ok}")
+            if (ssh_ok and redis_ok
+                    and (not need_browser or browser_ok)
+                    and (not need_browser_pna or browser_pna_ok)):
                 return
         except Exception as exc:  # noqa: BLE001
             last = f"poll error: {exc}"
@@ -321,7 +326,41 @@ def run_scenario(
     password: str,
     pw_alphabet: str,
     early_exit: bool = False,
+    seed_len: int = 2,
 ) -> dict:
+    if scenario == "browser_pna":
+        # Single-phase, SEEDED + length-bounded (Section 5.2 CORS-PNA remark).
+        # The length, pw0 and pw1 sit behind the CR/LF wall and are seeded
+        # (their brute-force cost is analytical, reported by
+        # scripts/verify_browser_pna.py). Only the tail pw{seed_len}..pw(n-1) is
+        # recovered through the live PNA preflight oracle. Reported
+        # total_guesses is the MEASURED tail cost, comparable to the recovered
+        # portion of the Firefox browser column.
+        seed = password[:seed_len]
+        tail = password[seed_len:]
+        http(f"{client_base}/set_secret", method="POST", body={"value": password})
+        time.sleep(1.0)
+        r = _http_run_attack(
+            attacker_base, "browser_pna", base_config,
+            known_prefix=seed, alphabet=pw_alphabet, max_length=len(tail),
+            terminator=None,  # length-bounded; default_config terminator is b""
+            expected=(tail if early_exit else None),
+        )
+        recovered_tail = r["recovered"]
+        return {
+            # Full password for the worker's == check; the seed is known.
+            "recovered": seed + recovered_tail,
+            "phase1_guesses": 0,  # no length phase: length is seeded
+            "phase2_guesses": r.get("total_guesses", -1),
+            "total_guesses": r.get("total_guesses", 0),
+            "elapsed": r.get("elapsed_seconds", 0),
+            "phase1_per_position": [],
+            "phase2_per_position": r.get("per_position", []),
+            "phase1_aborted": False,
+            "phase2_aborted": bool(r.get("aborted")),
+            "abort_reason": r.get("abort_reason"),
+        }
+
     if early_exit:
         if scenario == "direct" or scenario == "browser":
             ep1 = str(len(password)) + "\r"
@@ -411,6 +450,7 @@ def worker(
     pw_alphabet: str,
     config_override: dict,
     early_exit: bool,
+    seed_len: int,
     max_retries: int,
     results: list[dict],
     results_lock: threading.Lock,
@@ -427,9 +467,12 @@ def worker(
         with results_lock:
             attacker_bases.append(attacker_base)
         need_browser = "browser" in scenarios
+        need_browser_pna = "browser_pna" in scenarios
         _tprint(f"{tag} waiting for readiness at {attacker_base} / {client_base}"
-                f" (browser={'yes' if need_browser else 'no'})")
-        wait_ready(attacker_base, client_base, need_browser=need_browser)
+                f" (browser={'yes' if need_browser else 'no'}"
+                f" browser_pna={'yes' if need_browser_pna else 'no'})")
+        wait_ready(attacker_base, client_base, need_browser=need_browser,
+                   need_browser_pna=need_browser_pna)
         _tprint(f"{tag} ready; {len(trial_indices)} trial(s) assigned")
     except Exception as exc:  # noqa: BLE001
         _tprint(f"{tag} SETUP FAILED: {exc}")
@@ -457,7 +500,8 @@ def worker(
                     result = run_scenario(scenario, config_override,
                                           attacker_base, client_base,
                                           password, pw_alphabet,
-                                          early_exit=early_exit)
+                                          early_exit=early_exit,
+                                          seed_len=seed_len)
                     ok = result["recovered"] == password
                     if ok:
                         status = "PASS"
@@ -615,7 +659,13 @@ def main() -> int:
     ap.add_argument("--alphabet", default=string.ascii_lowercase,
                     help="password alphabet (default: lowercase ASCII)")
     ap.add_argument("--scenarios", default="direct,browser,ansible",
-                    help="comma-separated subset of {direct,browser,ansible}")
+                    help="comma-separated subset of "
+                         "{direct,browser,browser_pna,ansible}")
+    ap.add_argument("--seed-len", type=int, default=2,
+                    help="browser_pna only: number of seeded leading password "
+                         "bytes (length + pw0 + pw1 are CR/LF-walled; the "
+                         "sanctioned boundary is 2). The tail pw{seed_len}.. is "
+                         "recovered for real. Ignored by other scenarios.")
     ap.add_argument("--prefix", default="bench",
                     help="compose-project-name prefix (one per stack)")
     ap.add_argument("--no-build", action="store_true",
@@ -657,9 +707,25 @@ def main() -> int:
 
     scenarios = [s.strip() for s in args.scenarios.split(",") if s.strip()]
     for s in scenarios:
-        if s not in ("direct", "browser", "ansible"):
+        if s not in ("direct", "browser", "browser_pna", "ansible"):
             print(f"!! unknown scenario {s!r}", file=sys.stderr)
             return 2
+    if "browser_pna" in scenarios and args.seed_len >= args.password_length:
+        print(f"!! --seed-len {args.seed_len} must be < --password-length "
+              f"{args.password_length} for browser_pna", file=sys.stderr)
+        return 2
+    # Anti-shortcut boundary (Section 7): only {length, pw0, pw1} are behind the
+    # CR/LF wall; seeding pw2+ hands the oracle bytes it must recover.
+    if "browser_pna" in scenarios and args.seed_len > 2:
+        print(f"!! --seed-len {args.seed_len} exceeds the sanctioned boundary of "
+              f"2 for browser_pna (only {{length, pw0, pw1}} may be seeded)",
+              file=sys.stderr)
+        return 2
+
+    # The PNA Chromium is heavy; only launch it on the client when browser_pna
+    # is in scope (see client.py LAUNCH_CHROMIUM). Propagated to `docker compose`
+    # via the environment inherited by _compose().
+    os.environ["LAUNCH_CHROMIUM"] = "1" if "browser_pna" in scenarios else "0"
 
     if args.config:
         with open(args.config) as f:
@@ -678,6 +744,16 @@ def main() -> int:
     if args.min_margin is not None:
         config_override["min_margin"] = args.min_margin
         config_override["label"] = f"{config_override['label']}-mm{args.min_margin}"
+
+    # browser_pna's browser-class noise floor mandates the full [0..7] alignment
+    # sweep, so the fixed_single presets (NO / CE) are n/a (same as browser).
+    # Pinning a single alignment would break recovery -- reject it rather than
+    # silently skip the sweep.
+    if "browser_pna" in scenarios and config_override.get("alignment_mode") == "fixed_single":
+        print(f"!! browser_pna requires the full alignment sweep; optimization "
+              f"{args.optimization!r} (fixed_single) is n/a for it -- use FS, AS, "
+              f"FSCE, or ASCE", file=sys.stderr)
+        return 2
 
     rng = random.Random(args.seed)
     passwords = [
@@ -759,7 +835,7 @@ def main() -> int:
                 args=(i, p, project_width,
                       assignments[i], passwords, scenarios,
                       args.alphabet, config_override, args.early_exit,
-                      args.max_retries,
+                      args.seed_len, args.max_retries,
                       results, results_lock, failures,
                       stop_event, attacker_bases),
                 daemon=True,

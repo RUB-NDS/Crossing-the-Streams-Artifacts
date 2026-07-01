@@ -438,7 +438,7 @@ async def crack_byte_position(
         while True:
             per_al = {al: {} for al in active_alignment}
             for al in active_alignment:
-                alignment = make_alignment(al)
+                alignment = make_alignment(al, config.alignment_pool)
                 for c in active_candidates:
                     guesses += 1
                     per_al[al][c] = await adapter.measure_once(prefix, c, alignment)

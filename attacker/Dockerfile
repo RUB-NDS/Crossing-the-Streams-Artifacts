@@ -13,7 +13,7 @@ WORKDIR /app
 COPY attacker/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY attacker/mitm.py attacker/exploit.html ./
+COPY attacker/mitm.py attacker/exploit.html attacker/exploit_pna.html ./
 
 # The engine uses `from attacker.attack.*` imports, so we replicate the
 # on-disk layout: /app/attacker/attack/. /app is on sys.path (it is the

@@ -135,6 +135,7 @@ class SSHState:
         self._stderr_tail: deque[str] = deque(maxlen=64)
         self._playwright = None
         self._browser = None
+        self._chromium = None
         # Only one ansible-playbook runs at a time; a new /send_secret_ansible
         # call always kills the previous one before starting its own.
         self.ansible_proc: Optional[asyncio.subprocess.Process] = None
@@ -599,6 +600,48 @@ class SSHState:
                 await asyncio.sleep(1.0)
         LOG.error("could not load exploit page after 60 attempts")
 
+    async def launch_chromium(self) -> None:
+        """Launch a pinned headless Chromium and load the attacker's PNA
+        exploit page (browser_pna scenario).
+
+        Chromium 140 (via playwright==1.55.0) enforces Private Network Access
+        preflights: the cross-origin private-origin -> loopback fetch in
+        exploit_pna.html is answered with an OPTIONS preflight that strips the
+        body, so the guess rides in the request-URI *path* instead of the body.
+
+        We ENABLE PrivateNetworkAccessRespectPreflightResults so a failed
+        preflight additionally blocks the follow-up request -- a
+        PNA-STRENGTHENING flag, not a bypass. We pass NO flag that disables or
+        downgrades PNA / CORS / web security. ``--no-sandbox`` only drops the OS
+        process sandbox that Chromium otherwise requires to run as root in a
+        container; it does not touch PNA/CORS/web-security enforcement.
+        """
+        from playwright.async_api import async_playwright
+
+        if self._playwright is None:
+            self._playwright = await async_playwright().start()
+        self._chromium = await self._playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--enable-features=PrivateNetworkAccessRespectPreflightResults",
+            ],
+        )
+        page = await self._chromium.new_page()
+
+        exploit_url = "http://attacker:9000/exploit_pna"
+        for attempt in range(1, 61):
+            try:
+                resp = await page.goto(exploit_url, timeout=5000)
+                if resp and resp.ok:
+                    LOG.info("PNA Chromium loaded exploit_pna page from attacker")
+                    return
+            except Exception as exc:  # noqa: BLE001
+                if attempt % 10 == 0:
+                    LOG.warning("chromium navigate attempt %d: %s", attempt, exc)
+                await asyncio.sleep(1.0)
+        LOG.error("could not load exploit_pna page after 60 attempts")
+
     def status(self) -> dict:
         ansible_alive = (
             self.ansible_proc is not None
@@ -642,6 +685,7 @@ class SSHState:
             "sudo_secret_length": len(self.sudo_secret),
             "ansible_proc_alive": ansible_alive,
             "browser_connected": self._browser is not None,
+            "browser_pna_connected": self._chromium is not None,
         }
 
 
@@ -826,6 +870,19 @@ async def main() -> int:
         await state.launch_browser()
     except Exception as exc:  # noqa: BLE001
         LOG.warning("browser launch failed (browser scenario unavailable): %s", exc)
+
+    # The PNA Chromium is only needed for the browser_pna scenario. Launching it
+    # on every stack roughly doubles per-container browser memory/CPU and eats
+    # into the parallelism the benchmark overlay is tuned for, so it is gated by
+    # LAUNCH_CHROMIUM (default on, so the default stack and verify_browser_pna
+    # keep working; benchmark.py sets it to 0 for non-browser_pna runs).
+    if os.environ.get("LAUNCH_CHROMIUM", "1") != "0":
+        try:
+            await state.launch_chromium()
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("chromium launch failed (browser_pna scenario unavailable): %s", exc)
+    else:
+        LOG.info("LAUNCH_CHROMIUM=0: skipping PNA Chromium (browser_pna unavailable)")
 
     await asyncio.Event().wait()
     return 0
