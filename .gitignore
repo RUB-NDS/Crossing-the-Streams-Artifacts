@@ -8,3 +8,4 @@ __pycache__/
 # Benchmark output
 benchmark_results.json
 benchmark_summary.csv
+*.pdf
