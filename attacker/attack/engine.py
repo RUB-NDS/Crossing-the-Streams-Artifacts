@@ -1,5 +1,10 @@
 """Transport-agnostic engine: round loop, candidate ranking, metrics.
 
+Implements Algorithm 2 of the paper (Section 4.2) plus the noise
+compensation strategies of Section 4.3: candidate elimination, the full
+alignment sweep, and the adaptive alignment sweep with its pruning and
+reintroduction of unproductive alignment lengths.
+
 The engine calls adapter.measure_once(prefix, candidate, alignment) for
 every oracle query. Everything else lives here.
 
@@ -74,9 +79,9 @@ def _select_initial_alignment(
     config: AttackConfig,
     prev_al: int | None,
 ) -> list[int]:
-    if config.alignment_mode == AlignmentMode.FIXED_SINGLE:
+    if config.alignment_mode == AlignmentMode.KNOWN_LENGTH:
         return [config.alignment_lengths[0]]
-    if config.alignment_hint_carryover and prev_al is not None:
+    if config.alignment_carryover and prev_al is not None:
         if prev_al in config.alignment_lengths:
             return [prev_al]
     return list(config.alignment_lengths)
@@ -198,7 +203,7 @@ async def resolve_stalled_position(
         initial_alignment = (
             [alignment_hint] if (alignment_hint is not None
                                  and alignment_hint in config.alignment_lengths
-                                 and config.alignment_hint_carryover)
+                                 and config.alignment_carryover)
             else list(config.alignment_lengths)
         )
         result = await crack_byte_position(
@@ -279,7 +284,7 @@ async def resolve_stalled_position(
         initial_alignment = (
             [alignment_hint] if (alignment_hint is not None
                                  and alignment_hint in config.alignment_lengths
-                                 and config.alignment_hint_carryover)
+                                 and config.alignment_carryover)
             else list(config.alignment_lengths)
         )
         d2_log = (
@@ -465,13 +470,16 @@ async def crack_byte_position(
         if config.candidate_elimination:
             before = len(active_candidates)
             active_candidates = [
-                c for c in ranked if sums[c] - sums[best] < config.min_margin
+                c for c in ranked if sums[c] - sums[best] < config.commit_margin
             ]
             if len(active_candidates) < 2:
                 active_candidates = ranked[:2]
             eliminated = before - len(active_candidates)
 
-        if config.adaptive_alignment and rnd == 1:
+        # Adaptive alignment sweep: prune alignment lengths that show no
+        # observable difference across candidates -- the padding absorbed the
+        # signal, so the length is not at a tipping point.
+        if config.adaptive_alignment_sweep and rnd == 1:
             productive = {
                 al for al, m in per_al.items() if min(m.values()) < max(m.values())
             }
@@ -485,7 +493,10 @@ async def crack_byte_position(
                 if len(new_alignment) >= 3:
                     active_alignment = new_alignment
 
-        if config.stall_detection:
+        # Pruning is optimistic: the correct alignment can look unproductive
+        # in early rounds. Reintroduce pruned lengths once the remaining ones
+        # produce no observable difference for two consecutive rounds.
+        if config.alignment_reintroduction:
             if margin <= prev_margin and eliminated == 0:
                 stall_count += 1
             else:
@@ -505,17 +516,17 @@ async def crack_byte_position(
             log_prefix, rnd, best.decode("latin-1"), sums[best],
             second_sum, margin, len(active_candidates), len(active_alignment),
         )
-        if margin >= config.min_margin:
+        if margin >= config.commit_margin:
             break
     else:
         LOG.warning(
             "%s exhausted %d rounds, margin=%d (threshold=%d)",
-            log_prefix, config.max_rounds, margin, config.min_margin,
+            log_prefix, config.max_rounds, margin, config.commit_margin,
         )
 
     successful_alignment = _pick_alignment_with_largest_gap(per_al, best)
     ranked_all = sorted(config.alphabet, key=lambda c: sums[c])
-    clean_commit = margin >= config.min_margin
+    clean_commit = margin >= config.commit_margin
     return best, {
         "position": log_prefix,
         "best": best.decode("latin-1"),
@@ -540,7 +551,7 @@ async def run_attack(
     import aiohttp
 
     # The engine commits a recovered byte when it beats the second-best
-    # candidate by `min_margin`, and a position loop stops only when the
+    # candidate by `commit_margin`, and a position loop stops only when the
     # committed byte equals `config.terminator`. For the terminator to
     # ever be committed it must be in the candidate alphabet, so append
     # it defensively here. Callers don't have to include it themselves.
@@ -551,11 +562,11 @@ async def run_attack(
 
     LOG.info(
         "run_attack: scenario=%s label=%r prefix=%r alphabet=%d max_len=%d "
-        "mode=%s lengths=%s min_margin=%d max_rounds=%d",
+        "mode=%s lengths=%s commit_margin=%d max_rounds=%d",
         adapter.__class__.__name__, config.label,
         config.known_prefix, len(config.alphabet), config.max_length,
         config.alignment_mode.value, config.alignment_lengths,
-        config.min_margin, config.max_rounds,
+        config.commit_margin, config.max_rounds,
     )
     started = time.time()
 

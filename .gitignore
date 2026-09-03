@@ -8,3 +8,5 @@ __pycache__/
 # Benchmark output
 benchmark_results.json
 benchmark_summary.csv
+# Sweep output (curated runs are committed under evaluation/ instead)
+results/

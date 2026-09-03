@@ -196,7 +196,7 @@ def test_resolve_unique_winner_commits_two_positions() -> None:
     try:
         cfg = _cfg(
             candidate_fork_on_stall=True, fork_top_k=3, max_fork_depth=2,
-            max_length=32, min_margin=16,
+            max_length=32, commit_margin=16,
         )
         stalled = _stalled_info(
             sums={"e": 100, "c": 112, "k": 120, "s": 200, "r": 210},
@@ -267,7 +267,7 @@ def test_resolve_multi_clean_recurses_and_finds_2ply_winner() -> None:
     try:
         cfg = _cfg(
             candidate_fork_on_stall=True, fork_top_k=3, max_fork_depth=2,
-            max_length=32, min_margin=16,
+            max_length=32, commit_margin=16,
         )
         stalled = _stalled_info(
             sums={"e": 100, "c": 112, "k": 120, "s": 200, "r": 210},
@@ -330,7 +330,7 @@ def test_resolve_zero_clean_recurses_with_tentative_parents() -> None:
     try:
         cfg = _cfg(
             candidate_fork_on_stall=True, fork_top_k=3, max_fork_depth=2,
-            max_length=32, min_margin=16,
+            max_length=32, commit_margin=16,
         )
         stalled = _stalled_info(
             sums={"e": 100, "c": 112, "k": 120, "s": 200, "r": 210},
@@ -366,7 +366,7 @@ def test_resolve_zero_clean_no_depth2_winner_falls_back() -> None:
     try:
         cfg = _cfg(
             candidate_fork_on_stall=True, fork_top_k=3, max_fork_depth=2,
-            max_length=32, min_margin=16,
+            max_length=32, commit_margin=16,
         )
         stalled = _stalled_info(
             sums={"e": 100, "c": 112, "k": 120, "s": 200, "r": 210},
@@ -394,7 +394,7 @@ def test_resolve_insufficient_branches_skipped() -> None:
     try:
         cfg = _cfg(
             candidate_fork_on_stall=True, fork_top_k=2, max_fork_depth=2,
-            max_length=32, min_margin=16, terminator=b"c",
+            max_length=32, commit_margin=16, terminator=b"c",
         )
         # Top-2 sums: c (100, terminator), e (112) -- after filter, just 'e' -> empty
         # We need only c and e in the sums so that top-2 picks c and e, then

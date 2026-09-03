@@ -47,80 +47,73 @@ ANSIBLE_PHASE1_TERMINATOR = "\x00"
 ANSIBLE_PHASE2_TERMINATOR = "\n"
 
 
-# Preset keys match the optimization labels used in the paper's Table 2:
-#   NO   = no further optimization (fixed_single alignment)
-#   FS   = full alignment sweep
-#   AS   = adaptive alignment sweep
-#   CE   = candidate elimination (fixed_single alignment)
-#   FSCE = full alignment sweep + candidate elimination
-#   ASCE = adaptive alignment sweep + candidate elimination
-OPTIMIZATION_PRESETS: dict[str, dict[str, Any]] = {
+# Preset keys are the noise-compensation configurations of the paper's
+# Section 4.3, as reported in Table 3:
+#   NO    = no further compensation (known_length alignment)
+#   FS    = full alignment sweep
+#   AS    = adaptive alignment sweep
+#   CE    = candidate elimination (known_length alignment)
+#   AS+CE = adaptive alignment sweep + candidate elimination
+COMPENSATION_PRESETS: dict[str, dict[str, Any]] = {
     "NO": {
-        "alignment_mode": "fixed_single",
+        "alignment_mode": "known_length",
         "candidate_elimination": False,
         "constant_prefix_trim": True,
-        "adaptive_alignment": False,
-        "stall_detection": False,
-        "alignment_hint_carryover": False,
-        # alignment_lengths filled in from --fixed-al N
+        "adaptive_alignment_sweep": False,
+        "alignment_reintroduction": False,
+        "alignment_carryover": False,
+        # alignment_lengths filled in from --alignment-length L
     },
     "FS": {
         "alignment_mode": "full_sweep",
         "candidate_elimination": False,
         "constant_prefix_trim": True,
-        "adaptive_alignment": False,
-        "stall_detection": False,
-        "alignment_hint_carryover": False,
+        "adaptive_alignment_sweep": False,
+        "alignment_reintroduction": False,
+        "alignment_carryover": False,
     },
     "AS": {
         "alignment_mode": "full_sweep",
         "candidate_elimination": False,
         "constant_prefix_trim": True,
-        "adaptive_alignment": True,
-        "stall_detection": True,
-        "alignment_hint_carryover": True,
+        "adaptive_alignment_sweep": True,
+        "alignment_reintroduction": True,
+        "alignment_carryover": True,
     },
     "CE": {
-        "alignment_mode": "fixed_single",
+        "alignment_mode": "known_length",
         "candidate_elimination": True,
         "constant_prefix_trim": True,
-        "adaptive_alignment": False,
-        "stall_detection": False,
-        "alignment_hint_carryover": False,
-        # alignment_lengths filled in from --fixed-al N
+        "adaptive_alignment_sweep": False,
+        "alignment_reintroduction": False,
+        "alignment_carryover": False,
+        # alignment_lengths filled in from --alignment-length L
     },
-    "FSCE": {
+    "AS+CE": {
         "alignment_mode": "full_sweep",
         "candidate_elimination": True,
         "constant_prefix_trim": True,
-        "adaptive_alignment": False,
-        "stall_detection": False,
-        "alignment_hint_carryover": False,
-    },
-    "ASCE": {
-        "alignment_mode": "full_sweep",
-        "candidate_elimination": True,
-        "constant_prefix_trim": True,
-        "adaptive_alignment": True,
-        "stall_detection": True,
-        "alignment_hint_carryover": True,
+        "adaptive_alignment_sweep": True,
+        "alignment_reintroduction": True,
+        "alignment_carryover": True,
     },
 }
 
 
-def _build_config_override(optimization: str, fixed_al: int | None,
+def _build_config_override(compensation: str, alignment_length: int | None,
                            label_suffix: str) -> dict[str, Any]:
-    if optimization not in OPTIMIZATION_PRESETS:
-        raise ValueError(f"unknown optimization {optimization!r}")
-    cfg = dict(OPTIMIZATION_PRESETS[optimization])
-    if cfg.get("alignment_mode") == "fixed_single":
-        if fixed_al is None:
+    if compensation not in COMPENSATION_PRESETS:
+        raise ValueError(f"unknown compensation preset {compensation!r}")
+    cfg = dict(COMPENSATION_PRESETS[compensation])
+    if cfg.get("alignment_mode") == "known_length":
+        if alignment_length is None:
             raise ValueError(
-                f"--fixed-al N is required with --optimization {optimization} "
-                "(fixed_single alignment mode needs a pinned length)"
+                f"--alignment-length L is required with "
+                f"--compensation {compensation} (the known_length alignment "
+                "mode needs the winning alignment length)"
             )
-        cfg["alignment_lengths"] = [int(fixed_al)]
-    cfg["label"] = f"{optimization}{label_suffix}"
+        cfg["alignment_lengths"] = [int(alignment_length)]
+    cfg["label"] = f"{compensation}{label_suffix}"
     return cfg
 
 
@@ -139,7 +132,7 @@ def http(
     method: str = "GET",
     body: Any = None,
     timeout: float = 86400.0,  # 24h -- slow scenarios (browser + high
-                               # min_margin + adaptive sweep) can run multi-hour
+                               # commit_margin + adaptive sweep) can run multi-hour
 ) -> dict[str, Any]:
     data = None
     headers: dict[str, str] = {}
@@ -496,7 +489,7 @@ def worker(
                 "project": project,
                 "trial": trial_idx,
                 "scenario": scenario,
-                "optimization": config_override.get("label", ""),
+                "compensation": config_override.get("label", ""),
                 "password": password,
                 "recovered": result["recovered"],
                 "ok": ok,
@@ -634,20 +627,22 @@ def main() -> int:
                     help="do not tear down stacks after benchmark completes")
     ap.add_argument("--output", default="benchmark_results.json",
                     help="path for detailed JSON output")
-    ap.add_argument("--optimization", default="ASCE",
-                    choices=list(OPTIMIZATION_PRESETS.keys()),
-                    help="named optimization preset (paper Table 2 labels: "
-                         "NO, FS, AS, CE, FSCE, ASCE)")
-    ap.add_argument("--fixed-al", type=int, default=None,
-                    help="required for fixed_single optimizations (NO, CE): "
-                         "single pinned alignment length")
+    ap.add_argument("--compensation", default="AS+CE",
+                    choices=list(COMPENSATION_PRESETS.keys()),
+                    help="noise-compensation configuration of Section 4.3, "
+                         "as reported in Table 3")
+    ap.add_argument("--alignment-length", type=int, default=None,
+                    help="required for the known_length presets (NO, CE): "
+                         "the alignment length that lands a guess on a "
+                         "tipping point")
     ap.add_argument("--config", default=None,
                     help="path to raw JSON config override; "
-                         "if set, overrides --optimization")
-    ap.add_argument("--min-margin", type=int, default=None,
-                    help="override min_margin on top of the selected "
-                         "optimization/config (e.g. --min-margin 32); "
-                         "appended to the config label as -mmN")
+                         "if set, overrides --compensation")
+    ap.add_argument("--commit-margin", type=int, default=None,
+                    help="override commit_margin (the paper's mu) on top of "
+                         "the selected compensation/config (e.g. "
+                         "--commit-margin 32); appended to the config label "
+                         "as -cmN")
     ap.add_argument("--csv-summary", default="benchmark_summary.csv",
                     help="path for the one-row-per-scenario CSV summary")
     ap.add_argument("--early-exit", action="store_true",
@@ -659,8 +654,8 @@ def main() -> int:
                     help="if a recovery fails, retry the same password this "
                          "many additional times before recording it as a "
                          "failure (e.g. --max-retries 2 = up to 3 attempts). "
-                         "Used by sweep_min_margin.sh to absorb transient "
-                         "noise before bumping min_margin.")
+                         "Used by sweep_commit_margin.sh to absorb transient "
+                         "noise before bumping commit_margin.")
     args = ap.parse_args()
 
     scenarios = [s.strip() for s in args.scenarios.split(",") if s.strip()]
@@ -675,17 +670,19 @@ def main() -> int:
         if "label" not in config_override:
             config_override["label"] = config_path.name
     else:
-        uses_fixed_single = (
-            OPTIMIZATION_PRESETS[args.optimization].get("alignment_mode") == "fixed_single"
+        uses_known_length = (
+            COMPENSATION_PRESETS[args.compensation].get("alignment_mode")
+            == "known_length"
         )
         config_override = _build_config_override(
-            args.optimization, args.fixed_al,
-            label_suffix=(f"-al{args.fixed_al}" if uses_fixed_single else ""),
+            args.compensation, args.alignment_length,
+            label_suffix=(f"-al{args.alignment_length}"
+                          if uses_known_length else ""),
         )
 
-    if args.min_margin is not None:
-        config_override["min_margin"] = args.min_margin
-        config_override["label"] = f"{config_override['label']}-mm{args.min_margin}"
+    if args.commit_margin is not None:
+        config_override["commit_margin"] = args.commit_margin
+        config_override["label"] = f"{config_override['label']}-cm{args.commit_margin}"
 
     rng = random.Random(args.seed)
     passwords = [
@@ -707,10 +704,10 @@ def main() -> int:
     print(f"  alphabet size : {len(args.alphabet)}")
     print(f"  scenarios     : {scenarios}")
     print(f"  seed          : {args.seed}")
-    print(f"  optimization  : {args.optimization}")
+    print(f"  compensation  : {args.compensation}")
     print(f"  config label  : {config_override['label']}")
-    if args.min_margin is not None:
-        print(f"  min_margin    : {args.min_margin} (override)")
+    if args.commit_margin is not None:
+        print(f"  commit_margin : {args.commit_margin} (override)")
     if args.max_retries > 0:
         print(f"  max_retries   : {args.max_retries} "
               f"(up to {1 + args.max_retries} attempts per password)")
@@ -795,10 +792,10 @@ def main() -> int:
         all_passed = all(s["trials_failed"] == 0 for s in summary.values())
         success = all_passed and not failures and not early_exit_triggered
 
-        # Exit-code triage so the caller (e.g. sweep_min_margin.sh) can tell
-        # "algorithm wasn't strong enough at this min_margin" (FAIL/CANCELLED
-        # -- bumping mm may help) from "infrastructure broke" (ERROR / setup
-        # failure -- bumping mm won't help, abort). CANCELLED is a downstream
+        # Exit-code triage so the caller (e.g. sweep_commit_margin.sh) can tell
+        # "algorithm wasn't strong enough at this commit_margin" (FAIL/CANCELLED
+        # -- bumping the margin may help) from "infrastructure broke" (ERROR /
+        # setup failure -- bumping it won't help, abort). CANCELLED is a downstream
         # consequence of *whatever* tripped early-exit first, so we look for
         # ERROR explicitly.
         technical_errors = [
@@ -818,7 +815,7 @@ def main() -> int:
                     "alphabet": args.alphabet,
                     "scenarios": scenarios,
                     "seed": args.seed,
-                    "optimization": args.optimization,
+                    "compensation": args.compensation,
                     "config_label": config_override["label"],
                     "early_exit": args.early_exit,
                     "max_retries": args.max_retries,
@@ -830,12 +827,14 @@ def main() -> int:
                 "early_exit_triggered": early_exit_triggered,
                 "success": success,
             }, f, indent=2)
+            f.write("\n")
         print(f"\nDetailed results -> {args.output}")
 
         with Path(args.csv_summary).open("w", newline="") as f:
-            w = csv.writer(f)
+            # LF, not csv's default CRLF -- everything else in the repo is LF.
+            w = csv.writer(f, lineterminator="\n")
             w.writerow([
-                "scenario", "optimization", "trials_passed",
+                "scenario", "compensation", "trials_passed",
                 "per_attack_min", "per_attack_max", "per_attack_avg", "per_attack_total",
                 "per_position_count",
                 "per_position_min", "per_position_max", "per_position_avg",
@@ -860,7 +859,7 @@ def main() -> int:
 
         # Exit codes:
         #   0 = all trials passed
-        #   1 = algorithmic miss only (sweep can try a higher min_margin)
+        #   1 = algorithmic miss only (sweep can try a higher commit_margin)
         #   2 = technical failure occurred (sweep should abort entirely)
         if success:
             return 0

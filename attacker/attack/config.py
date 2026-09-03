@@ -14,8 +14,15 @@ from typing import Any, Literal
 
 
 class AlignmentMode(str, Enum):
+    """How the engine picks the alignment length (Section 4.3).
+
+    FULL_SWEEP tries every length in `alignment_lengths` per candidate;
+    KNOWN_LENGTH pins the single length the attacker is assumed to know
+    (the cost-easing assumption of Section 4.1).
+    """
+
     FULL_SWEEP = "full_sweep"
-    FIXED_SINGLE = "fixed_single"
+    KNOWN_LENGTH = "known_length"
 
 
 @dataclass
@@ -25,7 +32,7 @@ class AttackConfig:
     max_length: int
     terminator: bytes
 
-    min_margin: int
+    commit_margin: int
     max_rounds: int
     settle: float
 
@@ -34,9 +41,9 @@ class AttackConfig:
 
     candidate_elimination: bool
     constant_prefix_trim: bool
-    adaptive_alignment: bool
-    stall_detection: bool
-    alignment_hint_carryover: bool
+    adaptive_alignment_sweep: bool
+    alignment_reintroduction: bool
+    alignment_carryover: bool
 
     outlier_threshold: int
 

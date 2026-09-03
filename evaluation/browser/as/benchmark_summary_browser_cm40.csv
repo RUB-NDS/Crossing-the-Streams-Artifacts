@@ -1,0 +1,2 @@
+scenario,compensation,trials_passed,per_attack_min,per_attack_max,per_attack_avg,per_attack_total,per_position_count,per_position_min,per_position_max,per_position_avg,fork_triggered_positions,fork_overhead_guesses,early_exit_triggered
+browser,AS-cm40,0,,,,0,0,,,,0,0,true

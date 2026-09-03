@@ -316,7 +316,16 @@ async def handle_run_attack(request: web.Request) -> web.Response:
             {"ok": False, "error": "another attack is in progress"}, status=409,
         )
 
-    config = adapter_cls.default_config().overlay(overrides)
+    try:
+        config = adapter_cls.default_config().overlay(overrides)
+    except TypeError as exc:
+        # An unknown config key. dataclasses.replace() names the offender and
+        # suggests the closest field, which is exactly what a caller still on
+        # a pre-rename key name (min_margin, stall_detection, ...) needs.
+        return web.json_response(
+            {"ok": False, "error": f"bad config: {exc}", "scenario": scenario},
+            status=400,
+        )
     adapter = _build_adapter(adapter_cls, scenario)
 
     LOG.info("HTTP /run_attack: scenario=%s label=%r", scenario, config.label)

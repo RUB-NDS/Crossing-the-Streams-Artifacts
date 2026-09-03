@@ -1,4 +1,4 @@
-"""Direct-injection adapter (Section 5.1).
+"""Direct plaintext injection adapter (Section 5.1).
 
 Ordering per oracle query:
   1. Flush -- throwaway connection, `flush_bytes` random bytes.
@@ -103,16 +103,16 @@ class DirectAdapter:
             alphabet=[bytes([c]) for c in b"abcdefghijklmnopqrstuvwxyz0123456789"],
             max_length=32,
             terminator=b"\r",
-            min_margin=16,
+            commit_margin=16,
             max_rounds=128,
             settle=0.01,
             alignment_mode=AlignmentMode.FULL_SWEEP,
             alignment_lengths=[0, 1, 2, 3, 4, 5, 6, 7],
             candidate_elimination=True,
             constant_prefix_trim=True,
-            adaptive_alignment=True,
-            stall_detection=True,
-            alignment_hint_carryover=True,
+            adaptive_alignment_sweep=True,
+            alignment_reintroduction=True,
+            alignment_carryover=True,
             outlier_threshold=0,
             flush_bytes=32768,
             flush_pool="secrets_random",

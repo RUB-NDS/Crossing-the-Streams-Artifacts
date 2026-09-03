@@ -10,16 +10,16 @@ def _base_kwargs() -> dict[str, Any]:
         alphabet=[bytes([c]) for c in b"abc"],
         max_length=4,
         terminator=b"\n",
-        min_margin=16,
+        commit_margin=16,
         max_rounds=64,
         settle=0.003,
         alignment_mode=AlignmentMode.FULL_SWEEP,
         alignment_lengths=[0, 1, 2, 3, 4, 5, 6, 7],
         candidate_elimination=True,
         constant_prefix_trim=True,
-        adaptive_alignment=True,
-        stall_detection=True,
-        alignment_hint_carryover=True,
+        adaptive_alignment_sweep=True,
+        alignment_reintroduction=True,
+        alignment_carryover=True,
         outlier_threshold=0,
         flush_bytes=32768,
         flush_pool="secrets_random",
@@ -36,14 +36,14 @@ def test_construct_defaults() -> None:
 def test_from_dict_partial_override() -> None:
     base = AttackConfig(**_base_kwargs())
     overridden = base.overlay({
-        "min_margin": 32,
+        "commit_margin": 32,
         "candidate_elimination": False,
-        "alignment_mode": "fixed_single",
+        "alignment_mode": "known_length",
         "alignment_lengths": [3],
     })
-    assert overridden.min_margin == 32
+    assert overridden.commit_margin == 32
     assert overridden.candidate_elimination is False
-    assert overridden.alignment_mode == AlignmentMode.FIXED_SINGLE
+    assert overridden.alignment_mode == AlignmentMode.KNOWN_LENGTH
     assert overridden.alignment_lengths == [3]
     # Unmentioned fields are preserved.
     assert overridden.max_rounds == base.max_rounds

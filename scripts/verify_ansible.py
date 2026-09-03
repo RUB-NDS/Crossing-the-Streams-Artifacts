@@ -142,10 +142,10 @@ def main() -> int:
             "alphabet": PHASE1_ALPHABET,
             "max_length": 1,
             "terminator": "\x00",
-            "min_margin": 8,
+            "commit_margin": 8,
             "max_rounds": 96,
             # Pin to the empirically winning alignment length (al=1).
-            "alignment_mode": "fixed_single",
+            "alignment_mode": "known_length",
             "alignment_lengths": [1],
         },
     }).encode("utf-8")
@@ -175,9 +175,9 @@ def main() -> int:
             "alphabet": PHASE2_ALPHABET,
             "max_length": length_byte,
             "terminator": "\n",
-            "min_margin": 8,
+            "commit_margin": 8,
             "max_rounds": 96,
-            "alignment_mode": "fixed_single",
+            "alignment_mode": "known_length",
             "alignment_lengths": [1],
         },
     }).encode("utf-8")

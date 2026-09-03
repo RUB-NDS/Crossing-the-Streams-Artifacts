@@ -34,4 +34,6 @@ class Adapter(Protocol):
 
     @classmethod
     def default_config(cls) -> AttackConfig:
-        """Scenario-tuned config; optimization presets override toggle fields on top."""
+        """Scenario-tuned config; noise-compensation presets override toggle
+        fields on top.
+        """

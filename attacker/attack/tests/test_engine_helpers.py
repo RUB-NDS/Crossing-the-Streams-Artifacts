@@ -42,27 +42,27 @@ def test_pick_alignment_returns_none_when_only_one_candidate() -> None:
     assert _pick_alignment_with_largest_gap(per_al, best=b"h") is None
 
 
-def test_select_initial_alignment_fixed_single() -> None:
-    cfg = _cfg(alignment_mode=AlignmentMode.FIXED_SINGLE, alignment_lengths=[3])
+def test_select_initial_alignment_known_length() -> None:
+    cfg = _cfg(alignment_mode=AlignmentMode.KNOWN_LENGTH, alignment_lengths=[3])
     assert _select_initial_alignment(cfg, prev_al=None) == [3]
     assert _select_initial_alignment(cfg, prev_al=5) == [3]  # hint ignored in fixed mode
 
 
 def test_select_initial_alignment_full_sweep_no_hint() -> None:
-    cfg = _cfg(alignment_hint_carryover=False)
+    cfg = _cfg(alignment_carryover=False)
     assert _select_initial_alignment(cfg, prev_al=None) == list(range(8))
     assert _select_initial_alignment(cfg, prev_al=3) == list(range(8))  # carryover off
 
 
 def test_select_initial_alignment_full_sweep_with_hint() -> None:
-    cfg = _cfg(alignment_hint_carryover=True)
+    cfg = _cfg(alignment_carryover=True)
     assert _select_initial_alignment(cfg, prev_al=None) == list(range(8))
     assert _select_initial_alignment(cfg, prev_al=3) == [3]
 
 
 def test_select_initial_alignment_hint_out_of_set_falls_back() -> None:
     # If prev_al isn't in the configured alignment set, full sweep is used.
-    cfg = _cfg(alignment_hint_carryover=True, alignment_lengths=[0, 2, 4])
+    cfg = _cfg(alignment_carryover=True, alignment_lengths=[0, 2, 4])
     assert _select_initial_alignment(cfg, prev_al=3) == [0, 2, 4]
 
 
@@ -87,7 +87,7 @@ if __name__ == "__main__":
     test_pick_alignment_returns_al_with_largest_gap()
     test_pick_alignment_returns_none_when_no_gap()
     test_pick_alignment_returns_none_when_only_one_candidate()
-    test_select_initial_alignment_fixed_single()
+    test_select_initial_alignment_known_length()
     test_select_initial_alignment_full_sweep_no_hint()
     test_select_initial_alignment_full_sweep_with_hint()
     test_select_initial_alignment_hint_out_of_set_falls_back()

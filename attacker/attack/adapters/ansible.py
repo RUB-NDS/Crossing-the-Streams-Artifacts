@@ -1,4 +1,4 @@
-"""Ansible adapter (Section 5.3) -- fresh SSH per guess.
+"""Ansible password recovery adapter (Section 5.3) -- fresh SSH per guess.
 
 Each oracle query triggers a fresh ansible-playbook run on the client
 via /send_secret_ansible, then opens a direct-tcpip channel through the
@@ -100,16 +100,16 @@ class AnsibleAdapter:
             alphabet=[bytes([c]) for c in b"abcdefghijklmnopqrstuvwxyz0123456789"],
             max_length=32,
             terminator=b"\n",
-            min_margin=8,
+            commit_margin=8,
             max_rounds=128,
             settle=0.25,
             alignment_mode=AlignmentMode.FULL_SWEEP,
             alignment_lengths=[0, 1, 2, 3, 4, 5, 6, 7],
             candidate_elimination=True,
             constant_prefix_trim=True,
-            adaptive_alignment=False,
-            stall_detection=False,
-            alignment_hint_carryover=False,
+            adaptive_alignment_sweep=False,
+            alignment_reintroduction=False,
+            alignment_carryover=False,
             outlier_threshold=0,
             flush_bytes=0,
             flush_pool="none",

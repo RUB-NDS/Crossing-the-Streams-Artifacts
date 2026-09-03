@@ -5,7 +5,7 @@ with code in this repository.
 
 `README.md` is the canonical reference for layout, the architecture
 overview, the HTTP control surface, and how to run the artifact. The
-*paper* (not in the repo) covers the threat model, attack algorithm,
+*paper* (not in the repo) covers the attacker model, attack algorithm,
 the constants the attack depends on, and the security analysis. This
 file covers only what's not there: repo workflow, cross-file
 architecture, and the pitfalls that bite during edits.
@@ -27,14 +27,17 @@ python scripts/verify_ansible.py
 
 # Scenario benchmark (multi-stack, isolated compose projects).
 # --scenarios   = subset of {direct, browser, ansible}.
-# --optimization = paper Table 2 labels: NO, FS, AS, CE, FSCE, ASCE.
-python scripts/benchmark.py --stacks 4 --trials 100 --optimization ASCE
-python scripts/benchmark.py --stacks 2 --trials 50 --scenarios direct --optimization NO --fixed-al 1
+# --compensation = noise-compensation configuration (Section 4.3): NO, FS,
+#                  AS, CE, AS+CE -- the five configurations of Table 3.
+#                  NO and CE need --alignment-length L.
+python scripts/benchmark.py --stacks 4 --trials 100 --compensation AS+CE
+python scripts/benchmark.py --stacks 2 --trials 50 --scenarios direct \
+    --compensation NO --alignment-length 1
 
-# Min-margin (commit-margin) sweep harness (Table 2 in the paper).
+# Commit-margin (the paper's mu) sweep harness (Table 3).
 # Exit-code contract: 0 = 100% success, 1 = algorithmic miss (sweep can
-# bump min_margin), 2 = technical/infrastructure failure (abort).
-scripts/sweep_min_margin.sh
+# bump commit_margin), 2 = technical/infrastructure failure (abort).
+scripts/sweep_commit_margin.sh
 
 # Watch per-byte progress while an attack runs
 docker compose logs -f attacker
@@ -95,8 +98,9 @@ The client launches `ssh -N -C -v` with `SSH_TARGET_HOST=attacker` and
 `known_hosts`. `attacker/mitm.py` is a passive TCP forwarder between
 `:2222` and `server:22` -- it never terminates or decrypts SSH. Any
 active in-the-middle attempt is rejected at the SSH layer because of
-the pinned host key. This is not a bug; it is the threat model (passive
-on-path observer).
+the pinned host key. This is not a bug; it is the attacker model of
+Section 4.1 (passive on-path eavesdropper plus network or web
+attacker).
 
 ### The attacker container does three things in one process
 
@@ -137,7 +141,7 @@ which writes sibling container IPs into `/etc/hosts` so the main
 process never queries Docker's embedded DNS resolver under burst load.
 
 Results: `benchmark_results.json` (per-trial, per-position detail) and
-`benchmark_summary.csv` (per-`(scenario, optimization)` aggregates).
+`benchmark_summary.csv` (per-`(scenario, compensation)` aggregates).
 `scripts/stats.py <results.json>` prints n / min / max / mean / median /
 stdev over the `total_guesses` field of passing trials.
 
@@ -147,42 +151,57 @@ stdev over the `total_guesses` field of passing trials.
   `COPY`'d at image build time, not bind-mounted. Host scripts won't
   see changes until the relevant service is rebuilt.
 - **Do not casually change the tuned constants.**
-  `flush_bytes=32768` (32 KiB, the zlib LZ77 window size) and `flush_pool="secrets_random"` (direct/browser),
-  `guess_prefill_bytes=16384` (browser only), alignment pool
-  `0x80..0x8F`, the per-scenario `min_margin`, the adapter-specific
-  ordering, and `outlier_threshold` are all explained in the paper
-  (Sections 4 and 5) and in adapter docstrings. Changes here routinely
-  collapse attack throughput.
+  `flush_bytes=32768` (32 KiB, deflate's maximum search-buffer size) and
+  `flush_pool="secrets_random"` (direct/browser),
+  `guess_prefill_bytes=16384` (browser only, the paper's "random data
+  prepended to the guess body"), alignment pool `0x80..0x8F` (8-bit
+  static-Huffman literals), the per-scenario `commit_margin`, and the
+  adapter-specific ordering are explained in the paper (Sections 4
+  and 5) and in adapter docstrings. `outlier_threshold`,
+  `constant_prefix_trim`, and `candidate_fork_on_stall` are
+  implementation details with no counterpart in the paper. Changes here
+  routinely collapse attack throughput.
 - **Terminator must be in the alphabet.** The engine auto-appends
   `terminator` to `alphabet` if missing; omit at your peril if you
   bypass the overlay path.
 - **Cipher assumption.** The alignment sweep assumes
   `chacha20-poly1305@openssh.com`'s 8-byte padding granularity
-  (`alignment_lengths=[0..7]`). AES-CTR+HMAC-ETM would need `[0..15]`;
-  the negotiated cipher is visible at
-  `GET http://localhost:8000/status`.
-- **Ansible `fixed_single` mode is the speed knob, not a correctness
+  (`alignment_lengths=[0..7]`). AES-based modes pad to 16 bytes and
+  would need `[0..15]`, growing the sweep -- and with it the guess
+  count -- linearly (paper Section 8.1, "Cipher Dependence"). The
+  negotiated cipher is visible at `GET http://localhost:8000/status`.
+- **Ansible `known_length` mode is the speed knob, not a correctness
   knob.** After the first position locks the winning alignment length,
   pinning to it skips the 8x sweep. If the sweep fails to lock, the
   trial fails -- don't silently disable the sweep.
-- **Sweep harness exit codes.** `scripts/sweep_min_margin.sh` relies on
-  `benchmark.py` distinguishing rc=1 (algorithmic miss; bump
-  `min_margin` and retry) from rc=2 (technical/infrastructure failure;
-  abort entire sweep). Don't muddle the two.
+- **Sweep harness exit codes.** `scripts/sweep_commit_margin.sh` relies
+  on `benchmark.py` distinguishing rc=1 (algorithmic miss; bump
+  `commit_margin` and retry) from rc=2 (technical/infrastructure
+  failure; abort entire sweep). Don't muddle the two.
 - **`evaluation/` is curated, not raw sweep output.** A fresh
-  `scripts/sweep_min_margin.sh` run writes to
-  `results/{OPTIMIZATION}/benchmark_*_{scenario}_mmN.{json,csv}`
-  (optimization-first). The committed Table-2 dataset is at
-  `evaluation/{scenario}/{optimization}/benchmark_*_{scenario}_mmN.{json,csv}`
-  (scenario-first). If you re-run the sweep, don't dump straight into
-  `evaluation/`: it'll mix layouts and clobber whichever rows the paper
-  cites. Land new runs under `results/` and reorganise deliberately.
+  `scripts/sweep_commit_margin.sh` run writes to
+  `results/{COMPENSATION}/benchmark_*_{scenario}_cmN.{json,csv}`
+  (compensation-first, uppercase labels). The committed Table-3 dataset
+  is at
+  `evaluation/{scenario}/{compensation}/benchmark_*_{scenario}_cmN.{json,csv}`
+  (scenario-first, lowercase labels). If you re-run the sweep, don't dump
+  straight into `evaluation/`: it'll mix layouts and clobber whichever
+  rows the paper cites. Land new runs under `results/` and reorganise
+  deliberately. The committed files were restructured to the current
+  schema (`scenarios` / `compensation` / `config_label`, `-cmN` labels,
+  LF + trailing newline), so they and fresh sweep output share one shape.
+- **`evaluation/` holds exactly Table 3's 13 cells.** Five
+  configurations x three scenarios minus the four n/a cells (browser
+  NO/CE) minus nothing else. If you add a configuration, it belongs
+  under `results/` until the paper reports it.
 
 ## File -> purpose quick reference
 
-- `attacker/attack/engine.py` -- round loop, ranking, metrics,
-  `run_attack()` coroutine, and `resolve_stalled_position()`
-  (fork-on-stall fallback). Transport-agnostic.
+- `attacker/attack/engine.py` -- round loop, ranking, metrics, the
+  noise-compensation strategies of Section 4.3, the `run_attack()`
+  coroutine, and `resolve_stalled_position()` (fork-on-stall fallback,
+  not part of the paper and off in every configuration).
+  Transport-agnostic.
 - `attacker/attack/config.py` -- `AttackConfig`, `AlignmentMode`,
   `overlay()` for JSON -> dataclass marshalling.
 - `attacker/attack/alignment.py` -- `_ALIGNMENT_POOL`, `make_alignment()`.
@@ -196,18 +215,21 @@ stdev over the `total_guesses` field of passing trials.
   launcher (navigates to the attacker-served exploit page), ansible
   runner.
 - `scripts/benchmark.py` -- multi-stack scenario harness;
-  `OPTIMIZATION_PRESETS` is the single source of truth for the preset
-  toggle combinations.
-- `scripts/sweep_min_margin.sh` -- min-margin sweep that drives
-  `benchmark.py` per (scenario, optimization). Exit-code contract above.
+  `COMPENSATION_PRESETS` is the single source of truth for the
+  configuration toggle combinations.
+- `scripts/sweep_commit_margin.sh` -- commit-margin sweep that drives
+  `benchmark.py` per (scenario, compensation). Exit-code contract
+  above.
 - `scripts/pin-hosts.sh` -- DNS-pinning entrypoint shared by the
   attacker / client / server images.
 - `scripts/stats.py` -- summary stats over a `benchmark_results.json`.
 - `scripts/verify_*.py` -- per-scenario preconditions + one `hunter2`
   recovery end-to-end.
-- `evaluation/{scenario}/{optimization}/` -- committed Table 2 dataset.
+- `evaluation/{scenario}/{compensation}/` -- committed Table 3 dataset.
   One `(benchmark_results_*.json, benchmark_summary_*.csv)` pair per
-  `min_margin` step the sweep walked through; the highest-`mmN` pair is
+  commit-margin step the sweep walked through; the highest-`cmN` pair is
   the converged 100 %-recovery run. Browser has no `no/` or `ce/`
-  subtree (no fixed-alignment target). Feed any `benchmark_results_*.json`
-  to `scripts/stats.py` for per-cell mean/median/stdev.
+  subtree: both presuppose a known winning alignment length, which the
+  browser noise floor does not support -- the n/a cells of Table 3.
+  Feed any `benchmark_results_*.json` to `scripts/stats.py` for
+  per-cell mean/median/stdev.

@@ -1,4 +1,4 @@
-"""Browser-based-injection adapter (Section 5.2).
+"""Browser-based plaintext injection adapter (Section 5.2).
 
 sendBeacon() fuses CHANNEL_OPEN and CHANNEL_DATA into a single injection,
 so there is no pre-opened measure channel; the measurement filter
@@ -81,7 +81,7 @@ class BrowserAdapter:
             alphabet=[bytes([c]) for c in b"abcdefghijklmnopqrstuvwxyz0123456789"],
             max_length=32,
             terminator=b"\r",
-            min_margin=64,
+            commit_margin=64,
             max_rounds=128,
             settle=0.05,
             alignment_mode=AlignmentMode.FULL_SWEEP,
@@ -95,9 +95,9 @@ class BrowserAdapter:
             alignment_lengths=list(range(8)),
             candidate_elimination=True,
             constant_prefix_trim=True,
-            adaptive_alignment=False,
-            stall_detection=False,
-            alignment_hint_carryover=False,
+            adaptive_alignment_sweep=False,
+            alignment_reintroduction=False,
+            alignment_carryover=False,
             outlier_threshold=32,
             flush_bytes=32768,
             flush_pool="secrets_random",

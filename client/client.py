@@ -172,7 +172,7 @@ class SSHState:
         traffic) and declares the LocalForward that the attack injects
         through -- exactly the kind of "innocent helper port forward the
         user pasted into their ssh_config and forgot about" that the
-        Ansible scenario's threat model relies on.
+        Ansible scenario's attacker model relies on.
 
         ``Host server-root`` is what /set_sudo_secret uses to rotate the
         victim's sudo password via chpasswd. It goes *directly* to the
