@@ -22,13 +22,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from attacker.attack.config import AttackConfig, AlignmentMode
 from attacker.attack.adapters.direct import CLIENT_BASE, _sum_c2s
 
 if TYPE_CHECKING:
     import aiohttp
+
+    from attacker.mitm import PacketLog
 
 LOG = logging.getLogger("attack.ansible")
 
@@ -37,12 +39,12 @@ ANSIBLE_TUNNEL_PORT = int(os.environ.get("ANSIBLE_TUNNEL_PORT", "15432"))
 
 
 class AnsibleAdapter:
-    def __init__(self, packet_log: Any) -> None:
+    def __init__(self, packet_log: PacketLog) -> None:
         self._packet_log = packet_log
         self._config: AttackConfig | None = None
-        self._session: "aiohttp.ClientSession | None" = None
+        self._session: aiohttp.ClientSession | None = None
 
-    async def setup(self, config: AttackConfig, http_session: "aiohttp.ClientSession") -> None:
+    async def setup(self, config: AttackConfig, http_session: aiohttp.ClientSession) -> None:
         self._config = config
         self._session = http_session
 
@@ -85,6 +87,8 @@ class AnsibleAdapter:
         try:
             mw.close()
         except Exception:  # noqa: BLE001
+            # The measurement is already taken; a failure to close the
+            # tunnel affects nothing but the socket's own teardown.
             pass
 
         return measured
@@ -117,7 +121,9 @@ class AnsibleAdapter:
         )
 
 
-async def _open_ansible_tunnel(retries: int = 20, delay: float = 0.25) -> tuple:
+async def _open_ansible_tunnel(
+    retries: int = 20, delay: float = 0.25,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     for attempt in range(1, retries + 1):
         try:
             return await asyncio.open_connection(CLIENT_HOST, ANSIBLE_TUNNEL_PORT)

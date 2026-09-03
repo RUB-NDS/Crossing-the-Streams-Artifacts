@@ -1,10 +1,19 @@
 """Sanity checks for fork-on-stall. Run: python -m attacker.attack.tests.test_fork"""
-from attacker.attack.engine import _fork_applicable
+import asyncio
+from typing import Any
+
+import attacker.attack.engine as engine_mod
+from attacker.attack.engine import (
+    _classify_fork_outcome,
+    _fork_applicable,
+    _select_fork_branches,
+    resolve_stalled_position,
+)
 from attacker.attack.tests.test_engine_helpers import _cfg
 
 
-def _stalled_info(**overrides) -> dict:
-    base = {
+def _stalled_info(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
         "position": "pos  4",
         "best": "e",
         "guesses": 4000,
@@ -23,25 +32,25 @@ def _stalled_info(**overrides) -> dict:
     return base
 
 
-def test_fork_applicable_all_preconditions_met():
+def test_fork_applicable_all_preconditions_met() -> None:
     cfg = _cfg(candidate_fork_on_stall=True, fork_top_k=5, max_fork_depth=2, max_length=32)
     info = _stalled_info()
     assert _fork_applicable(cfg, position=4, pos_info=info, depth=0) is True
 
 
-def test_fork_applicable_config_off():
+def test_fork_applicable_config_off() -> None:
     cfg = _cfg(candidate_fork_on_stall=False, fork_top_k=5, max_fork_depth=2, max_length=32)
     info = _stalled_info()
     assert _fork_applicable(cfg, position=4, pos_info=info, depth=0) is False
 
 
-def test_fork_applicable_at_depth_cap():
+def test_fork_applicable_at_depth_cap() -> None:
     cfg = _cfg(candidate_fork_on_stall=True, fork_top_k=5, max_fork_depth=2, max_length=32)
     info = _stalled_info()
     assert _fork_applicable(cfg, position=4, pos_info=info, depth=2) is False
 
 
-def test_fork_applicable_at_position_boundary():
+def test_fork_applicable_at_position_boundary() -> None:
     # position + depth + 1 >= max_length -> cannot speculate
     cfg = _cfg(candidate_fork_on_stall=True, fork_top_k=5, max_fork_depth=2, max_length=5)
     info = _stalled_info()
@@ -49,17 +58,14 @@ def test_fork_applicable_at_position_boundary():
     assert _fork_applicable(cfg, position=3, pos_info=info, depth=1) is False
 
 
-def test_fork_applicable_false_on_clean_commit():
+def test_fork_applicable_false_on_clean_commit() -> None:
     # Guard: if somehow called on a clean commit, don't fork
     cfg = _cfg(candidate_fork_on_stall=True, fork_top_k=5, max_fork_depth=2, max_length=32)
     info = _stalled_info(clean_commit=True)
     assert _fork_applicable(cfg, position=4, pos_info=info, depth=0) is False
 
 
-from attacker.attack.engine import _select_fork_branches
-
-
-def test_select_fork_branches_top_k_by_sums_ascending():
+def test_select_fork_branches_top_k_by_sums_ascending() -> None:
     info = _stalled_info(
         sums={"e": 100, "c": 112, "k": 120, "s": 125, "r": 128, "a": 200},
     )
@@ -68,8 +74,8 @@ def test_select_fork_branches_top_k_by_sums_ascending():
     assert branches == [b"e", b"c", b"k"]
 
 
-def test_select_fork_branches_filters_terminator():
-    # 'e' is the top candidate but is the terminator — filter it out
+def test_select_fork_branches_filters_terminator() -> None:
+    # 'e' is the top candidate but is the terminator -- filter it out
     info = _stalled_info(
         sums={"e": 100, "c": 112, "k": 120, "s": 125, "r": 128},
     )
@@ -77,25 +83,22 @@ def test_select_fork_branches_filters_terminator():
     assert branches == [b"c", b"k", b"s"]
 
 
-def test_select_fork_branches_fewer_than_two_after_filter_returns_empty():
+def test_select_fork_branches_fewer_than_two_after_filter_returns_empty() -> None:
     # Top-2 with terminator removing one leaves one candidate -> empty
     info = _stalled_info(sums={"e": 100, "c": 112})
     branches = _select_fork_branches(info, top_k=2, terminator=b"e")
     assert branches == []
 
 
-def test_select_fork_branches_top_k_larger_than_alphabet_is_clipped():
+def test_select_fork_branches_top_k_larger_than_alphabet_is_clipped() -> None:
     info = _stalled_info(sums={"e": 100, "c": 112})
     branches = _select_fork_branches(info, top_k=10, terminator=b"\n")
     assert branches == [b"e", b"c"]
 
 
-from attacker.attack.engine import _classify_fork_outcome
-
-
-def _branch_result(clean: bool, best: str = "x") -> tuple:
+def _branch_result(clean: bool, best: str = "x") -> tuple[bytes, dict[str, Any]]:
     """Minimal (best, pos_info) shape returned by crack_byte_position."""
-    info = {
+    info: dict[str, Any] = {
         "position": "pos  5",
         "best": best,
         "guesses": 100,
@@ -110,7 +113,7 @@ def _branch_result(clean: bool, best: str = "x") -> tuple:
     return best.encode("latin-1"), info
 
 
-def test_classify_fork_outcome_unique_clean():
+def test_classify_fork_outcome_unique_clean() -> None:
     results = [
         _branch_result(clean=True,  best="r"),
         _branch_result(clean=False, best="x"),
@@ -121,7 +124,7 @@ def test_classify_fork_outcome_unique_clean():
     assert indices == [0]
 
 
-def test_classify_fork_outcome_multi_clean():
+def test_classify_fork_outcome_multi_clean() -> None:
     results = [
         _branch_result(clean=True,  best="r"),
         _branch_result(clean=True,  best="s"),
@@ -132,7 +135,7 @@ def test_classify_fork_outcome_multi_clean():
     assert indices == [0, 1]
 
 
-def test_classify_fork_outcome_zero_clean():
+def test_classify_fork_outcome_zero_clean() -> None:
     results = [
         _branch_result(clean=False, best="r"),
         _branch_result(clean=False, best="s"),
@@ -142,42 +145,44 @@ def test_classify_fork_outcome_zero_clean():
     assert indices == []
 
 
-import asyncio
-import attacker.attack.engine as engine_mod
-from attacker.attack.engine import resolve_stalled_position
-
-
 class _FakeCrack:
     """Scripted fake for crack_byte_position. Records call log."""
 
-    def __init__(self, responses: list[tuple[bytes, dict]]):
+    def __init__(self, responses: list[tuple[bytes, dict[str, Any]]]) -> None:
         self._responses = list(responses)
-        self.calls: list[dict] = []
+        self.calls: list[dict[str, Any]] = []
 
-    async def __call__(self, adapter, config, prefix, initial_alignment, log_prefix):
+    async def __call__(
+        self,
+        adapter: Any,
+        config: Any,
+        prefix: bytes,
+        initial_alignment: list[int],
+        log_prefix: str,
+    ) -> tuple[bytes, dict[str, Any]]:
         self.calls.append({
             "prefix": prefix,
             "initial_alignment": list(initial_alignment),
             "log_prefix": log_prefix,
         })
         if not self._responses:
-            raise AssertionError(f"FakeCrack exhausted — unexpected call: {log_prefix}")
+            raise AssertionError(f"FakeCrack exhausted -- unexpected call: {log_prefix}")
         return self._responses.pop(0)
 
 
-def _install_fake(fake: _FakeCrack):
+def _install_fake(fake: _FakeCrack) -> None:
     engine_mod.crack_byte_position = fake
 
 
-def _restore_crack(original):
+def _restore_crack(original: Any) -> None:
     engine_mod.crack_byte_position = original
 
 
-def _run(coro):
+def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
-def test_resolve_unique_winner_commits_two_positions():
+def test_resolve_unique_winner_commits_two_positions() -> None:
     original = engine_mod.crack_byte_position
     fake = _FakeCrack([
         # Branch 'e' at pos 5: cleanly commits 'r'
@@ -231,11 +236,8 @@ def test_resolve_unique_winner_commits_two_positions():
     assert winner["via_fork"] is True
     assert winner["fork_origin"] == 4
 
-    # Verify each branch was invoked with the right hypothetical prefix
-    # Base prefix = known_prefix + "hunt" (committed) — trimmed to len(known_prefix)
-    # We use _cfg's known_prefix = b"*3\r\n$"  (5 bytes), recovered="hunt" (4 bytes)
-    # full = known + recovered + branch (6 + 1 = 6 bytes after trim to 5) — actually depends on trim
-    # We just verify the branches were invoked in order e, c, k
+    # Each branch must be invoked in ascending-sum order (e, c, k) with the
+    # committed prefix plus that branch's candidate as the last byte.
     assert len(fake.calls) == 3
     # The hypothetical prefix should end with each branch candidate
     assert fake.calls[0]["prefix"].endswith(b"e")
@@ -247,19 +249,19 @@ def test_resolve_unique_winner_commits_two_positions():
     assert fake.calls[2]["initial_alignment"] == [3]
 
 
-def test_resolve_multi_clean_recurses_and_finds_2ply_winner():
+def test_resolve_multi_clean_recurses_and_finds_2ply_winner() -> None:
     original = engine_mod.crack_byte_position
     # Depth-1: branches e, c, k. e and c both cleanly commit at pos 5.
-    # Depth-2: extend each with their N+1 byte. e→r cleanly commits at pos 6;
-    # c→q stalls; k is not recursed (wasn't clean at depth 1).
+    # Depth-2: extend each with their N+1 byte. e->r cleanly commits at pos 6;
+    # c->q stalls; k is not recursed (wasn't clean at depth 1).
     fake = _FakeCrack([
         # Depth-1 calls (in branch order e, c, k)
         _branch_result(clean=True,  best="r"),   # e's N+1
         _branch_result(clean=True,  best="q"),   # c's N+1
         _branch_result(clean=False, best="z"),   # k's N+1
         # Depth-2 calls (only from cleanly-committed depth-1 branches: e, c)
-        _branch_result(clean=True,  best="t"),   # e→r→t at pos 6
-        _branch_result(clean=False, best="w"),   # c→q→w at pos 6
+        _branch_result(clean=True,  best="t"),   # e->r->t at pos 6
+        _branch_result(clean=False, best="w"),   # c->q->w at pos 6
     ])
     _install_fake(fake)
     try:
@@ -295,11 +297,11 @@ def test_resolve_multi_clean_recurses_and_finds_2ply_winner():
     assert result[2]["fork_origin"] == 4
 
     # Numeric accounting (depth-2 unique winner):
-    # Stall (4000) + depth-1 losers (c: 100, k: 100) + depth-2 loser (c→q: 100) = 4300
+    # Stall (4000) + depth-1 losers (c: 100, k: 100) + depth-2 loser (c->q: 100) = 4300
     assert result[0]["guesses"] == 4300
-    # Losers = all non-winner branches at both depths (c, k at d1 + c→q at d2) = 300
+    # Losers = all non-winner branches at both depths (c, k at d1 + c->q at d2) = 300
     assert result[0]["fork_info"]["losers_guesses"] == 300
-    # All branches at all depths (3 × 100 + 2 × 100) = 500
+    # All branches at all depths (3 * 100 + 2 * 100) = 500
     assert result[0]["fork_info"]["total_fork_guesses"] == 500
     # 3 depth-1 branches + 2 depth-2 branches = 5
     assert result[0]["fork_info"]["branches_run"] == 5
@@ -309,7 +311,7 @@ def test_resolve_multi_clean_recurses_and_finds_2ply_winner():
     assert result[2]["guesses"] == 100
 
 
-def test_resolve_zero_clean_recurses_with_tentative_parents():
+def test_resolve_zero_clean_recurses_with_tentative_parents() -> None:
     original = engine_mod.crack_byte_position
     # Depth-1: all three branches stall at N+1.
     # Depth-2: extend each with its best-margin N+1 byte. Only 'e' branch
@@ -320,9 +322,9 @@ def test_resolve_zero_clean_recurses_with_tentative_parents():
         _branch_result(clean=False, best="q"),  # c's N+1 (best-margin)
         _branch_result(clean=False, best="z"),  # k's N+1 (best-margin)
         # Depth-2 (all three recursed with tentative N+1)
-        _branch_result(clean=True,  best="t"),  # e→r→t at pos 6
-        _branch_result(clean=False, best="w"),  # c→q→w at pos 6
-        _branch_result(clean=False, best="v"),  # k→z→v at pos 6
+        _branch_result(clean=True,  best="t"),  # e->r->t at pos 6
+        _branch_result(clean=False, best="w"),  # c->q->w at pos 6
+        _branch_result(clean=False, best="v"),  # k->z->v at pos 6
     ])
     _install_fake(fake)
     try:
@@ -347,7 +349,7 @@ def test_resolve_zero_clean_recurses_with_tentative_parents():
     assert result[0]["fork_info"]["committed_via_fork"] == [5, 6]
 
 
-def test_resolve_zero_clean_no_depth2_winner_falls_back():
+def test_resolve_zero_clean_no_depth2_winner_falls_back() -> None:
     original = engine_mod.crack_byte_position
     # Every branch stalls at every depth -> best-margin at N returned
     fake = _FakeCrack([
@@ -385,7 +387,7 @@ def test_resolve_zero_clean_no_depth2_winner_falls_back():
     assert result[0]["fork_info"]["committed_via_fork"] == []
 
 
-def test_resolve_insufficient_branches_skipped():
+def test_resolve_insufficient_branches_skipped() -> None:
     fake = _FakeCrack([])
     original = engine_mod.crack_byte_position
     _install_fake(fake)
@@ -394,7 +396,7 @@ def test_resolve_insufficient_branches_skipped():
             candidate_fork_on_stall=True, fork_top_k=2, max_fork_depth=2,
             max_length=32, min_margin=16, terminator=b"c",
         )
-        # Top-2 sums: c (100, terminator), e (112) — after filter, just 'e' -> empty
+        # Top-2 sums: c (100, terminator), e (112) -- after filter, just 'e' -> empty
         # We need only c and e in the sums so that top-2 picks c and e, then
         # filtering out c (terminator) leaves just e (1 < 2).
         stalled = _stalled_info(
@@ -414,7 +416,7 @@ def test_resolve_insufficient_branches_skipped():
     assert fake.calls == []
 
 
-def test_select_fork_branches_filters_eliminated_candidates():
+def test_select_fork_branches_filters_eliminated_candidates() -> None:
     # y has a frozen-low sum (was eliminated early) but is not in active.
     # Without the fix, top-3-by-sums would return [y, e, c]. With the fix,
     # y is filtered because it's not alive.

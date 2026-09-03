@@ -26,6 +26,8 @@ from attacker.attack.config import AttackConfig, AlignmentMode
 if TYPE_CHECKING:
     import aiohttp
 
+    from attacker.mitm import PacketLog
+
 CLIENT_BASE = os.environ.get("CLIENT_CONTROL_URL", "http://client:8000")
 CLIENT_HOST = os.environ.get("CLIENT_HOST", "client")
 TUNNEL_PORT = int(os.environ.get("TUNNEL_PORT", "6379"))
@@ -33,12 +35,12 @@ LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "2222"))
 
 
 class DirectAdapter:
-    def __init__(self, packet_log: Any) -> None:
+    def __init__(self, packet_log: PacketLog) -> None:
         self._packet_log = packet_log
         self._config: AttackConfig | None = None
-        self._session: "aiohttp.ClientSession | None" = None
+        self._session: aiohttp.ClientSession | None = None
 
-    async def setup(self, config: AttackConfig, http_session: "aiohttp.ClientSession") -> None:
+    async def setup(self, config: AttackConfig, http_session: aiohttp.ClientSession) -> None:
         self._config = config
         self._session = http_session
 
@@ -59,6 +61,10 @@ class DirectAdapter:
                 fw.write(flush_data)
                 await fw.drain()
             except (ConnectionResetError, BrokenPipeError, OSError):
+                # Best-effort: the flush only has to reach the compressor. A
+                # refused or reset throwaway connection means this
+                # measurement runs on a partially filled window, which the
+                # per-round averaging absorbs.
                 pass
         if cfg.settle > 0:
             await asyncio.sleep(cfg.settle)
@@ -84,6 +90,8 @@ class DirectAdapter:
         try:
             mw.close()
         except Exception:  # noqa: BLE001
+            # The measurement is already taken; a failure to close the
+            # tunnel affects nothing but the socket's own teardown.
             pass
 
         return measured
@@ -116,7 +124,9 @@ class DirectAdapter:
         )
 
 
-async def _open_tunnel(retries: int = 20, delay: float = 1.0) -> tuple:
+async def _open_tunnel(
+    retries: int = 20, delay: float = 1.0,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     for attempt in range(1, retries + 1):
         try:
             return await asyncio.open_connection(CLIENT_HOST, TUNNEL_PORT)
@@ -135,7 +145,7 @@ def _flush_payload(cfg: AttackConfig) -> bytes:
     raise ValueError(f"unexpected flush_pool {cfg.flush_pool!r}")
 
 
-def _sum_c2s(records: list[dict], min_segment_size: int) -> int:
+def _sum_c2s(records: list[dict[str, Any]], min_segment_size: int) -> int:
     return sum(
         r["tcp_payload_len"] for r in records
         if r["dport"] == LISTEN_PORT and r["tcp_payload_len"] > min_segment_size

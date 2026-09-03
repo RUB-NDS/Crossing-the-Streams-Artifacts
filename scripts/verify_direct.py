@@ -16,12 +16,13 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from typing import Any, NoReturn
 
 ATTACKER_BASE = "http://127.0.0.1:9000"
 CLIENT_BASE = "http://127.0.0.1:8000"
 
 
-def http(method: str, url: str, body: bytes | None = None) -> dict:
+def http(method: str, url: str, body: bytes | None = None) -> dict[str, Any]:
     req = urllib.request.Request(url, method=method, data=body)
     with urllib.request.urlopen(req, timeout=10) as resp:
         raw = resp.read()
@@ -51,13 +52,13 @@ def step(title: str) -> None:
     print("=" * 72)
 
 
-def fail(msg: str) -> "NoReturn":  # type: ignore[name-defined]
+def fail(msg: str) -> NoReturn:
     print(f"FAIL: {msg}")
     sys.exit(1)
 
 
 def _run_attack(scenario: str, known_prefix: str, alphabet: str,
-                   max_length: int) -> dict:
+                max_length: int) -> dict[str, Any]:
     body = json.dumps({
         "scenario": scenario,
         "config": {

@@ -29,12 +29,14 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Callable
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = Path(__file__).resolve().parent.parent
 COMPOSE_FILES = [
-    "-f", os.path.join(ROOT, "docker-compose.yml"),
-    "-f", os.path.join(ROOT, "docker-compose.bench.yml"),
+    "-f", str(ROOT / "docker-compose.yml"),
+    "-f", str(ROOT / "docker-compose.bench.yml"),
 ]
 
 RESP_PREFIX = "*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$"
@@ -52,7 +54,7 @@ ANSIBLE_PHASE2_TERMINATOR = "\n"
 #   CE   = candidate elimination (fixed_single alignment)
 #   FSCE = full alignment sweep + candidate elimination
 #   ASCE = adaptive alignment sweep + candidate elimination
-OPTIMIZATION_PRESETS: dict[str, dict] = {
+OPTIMIZATION_PRESETS: dict[str, dict[str, Any]] = {
     "NO": {
         "alignment_mode": "fixed_single",
         "candidate_elimination": False,
@@ -107,7 +109,7 @@ OPTIMIZATION_PRESETS: dict[str, dict] = {
 
 
 def _build_config_override(optimization: str, fixed_al: int | None,
-                            label_suffix: str) -> dict:
+                           label_suffix: str) -> dict[str, Any]:
     if optimization not in OPTIMIZATION_PRESETS:
         raise ValueError(f"unknown optimization {optimization!r}")
     cfg = dict(OPTIMIZATION_PRESETS[optimization])
@@ -128,7 +130,7 @@ def _broadcast_cancel(attacker_bases: list[str]) -> None:
     for base in attacker_bases:
         try:
             http(f"{base}/cancel", method="POST", body={}, timeout=5)
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
 
@@ -138,9 +140,9 @@ def http(
     body: Any = None,
     timeout: float = 86400.0,  # 24h -- slow scenarios (browser + high
                                # min_margin + adaptive sweep) can run multi-hour
-) -> dict:
+) -> dict[str, Any]:
     data = None
-    headers = {}
+    headers: dict[str, str] = {}
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -150,7 +152,9 @@ def http(
     return json.loads(raw) if raw else {}
 
 
-def _compose(project: str, *args: str, capture: bool = False) -> subprocess.CompletedProcess:
+def _compose(
+    project: str, *args: str, capture: bool = False,
+) -> subprocess.CompletedProcess[bytes]:
     env = {**os.environ, "COMPOSE_PROJECT_NAME": project}
     cmd = ["docker", "compose", *COMPOSE_FILES, *args]
     return subprocess.run(
@@ -220,13 +224,13 @@ def wait_ready(
 def _http_run_attack(
     attacker_base: str,
     scenario: str,
-    config_override: dict,
+    config_override: dict[str, Any],
     known_prefix: str,
     alphabet: str,
     max_length: int,
     terminator: str | None = None,
     expected: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     body_cfg = dict(config_override)
     body_cfg["known_prefix"] = known_prefix
     body_cfg["alphabet"] = alphabet
@@ -246,21 +250,21 @@ def _http_run_attack(
 def _run_two_phase(
     attacker_base: str,
     scenario: str,
-    base_config: dict,
+    base_config: dict[str, Any],
     set_secret_url: str,
     password: str,
     phase1_prefix: str,
     phase1_alphabet: str,
     phase1_max: int,
     phase1_terminator: str | None,
-    phase2_prefix_from_phase1: Callable,
+    phase2_prefix_from_phase1: Callable[[str], str],
     phase2_alphabet: str,
-    phase2_max_fn: Callable,
+    phase2_max_fn: Callable[[str], int],
     phase2_terminator: str | None,
     strip_trailing: str,
     expected_phase1: str | None = None,
     expected_phase2: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     http(set_secret_url, method="POST", body={"value": password})
     # Small settle so the client's "set secret" reaches the server
     # before the attack starts measuring.
@@ -315,13 +319,15 @@ def _run_two_phase(
 
 def run_scenario(
     scenario: str,
-    base_config: dict,
+    base_config: dict[str, Any],
     attacker_base: str,
     client_base: str,
     password: str,
     pw_alphabet: str,
     early_exit: bool = False,
-) -> dict:
+) -> dict[str, Any]:
+    ep1: str | None
+    ep2: str | None
     if early_exit:
         if scenario == "direct" or scenario == "browser":
             ep1 = str(len(password)) + "\r"
@@ -409,10 +415,10 @@ def worker(
     passwords: list[str],
     scenarios: list[str],
     pw_alphabet: str,
-    config_override: dict,
+    config_override: dict[str, Any],
     early_exit: bool,
     max_retries: int,
-    results: list[dict],
+    results: list[dict[str, Any]],
     results_lock: threading.Lock,
     failures: list[str],
     stop_event: threading.Event,
@@ -446,7 +452,7 @@ def worker(
             t0 = time.time()
             max_attempts = 1 + max_retries
             attempts_used = 0
-            result: dict = {}
+            result: dict[str, Any] = {}
             ok = False
             status = ""
             for attempt in range(1, max_attempts + 1):
@@ -525,8 +531,10 @@ def worker(
                 return
 
 
-def summarise(results: list[dict], scenarios: list[str]) -> dict:
-    summary: dict[str, dict] = {}
+def summarise(
+    results: list[dict[str, Any]], scenarios: list[str],
+) -> dict[str, Any]:
+    summary: dict[str, dict[str, Any]] = {}
     for s in scenarios:
         sr = [r for r in results if r["scenario"] == s]
         passed = [r for r in sr if r["ok"]]
@@ -539,7 +547,7 @@ def summarise(results: list[dict], scenarios: list[str]) -> dict:
             for entry in (r.get("phase2_per_position") or []):
                 per_position_guesses.append(entry["guesses"])
 
-        def stats(xs: list[int]) -> dict:
+        def stats(xs: list[int]) -> dict[str, Any]:
             return {
                 "count": len(xs),
                 "min": min(xs) if xs else None,
@@ -574,7 +582,7 @@ def summarise(results: list[dict], scenarios: list[str]) -> dict:
     return summary
 
 
-def print_summary(summary: dict) -> None:
+def print_summary(summary: dict[str, Any]) -> None:
     print()
     print("=" * 96)
     print("SUMMARY  (per-attack | per-position)")
@@ -590,7 +598,7 @@ def print_summary(summary: dict) -> None:
         pa = summ["per_attack"]
         pp = summ["per_position"]
 
-        def fmt(x, fmt_spec=""):
+        def fmt(x: float | None, fmt_spec: str = "") -> str:
             return "-" if x is None else format(x, fmt_spec)
 
         print(
@@ -662,10 +670,10 @@ def main() -> int:
             return 2
 
     if args.config:
-        with open(args.config) as f:
-            config_override = json.load(f)
+        config_path = Path(args.config)
+        config_override = json.loads(config_path.read_text())
         if "label" not in config_override:
-            config_override["label"] = os.path.basename(args.config)
+            config_override["label"] = config_path.name
     else:
         uses_fixed_single = (
             OPTIMIZATION_PRESETS[args.optimization].get("alignment_mode") == "fixed_single"
@@ -745,7 +753,7 @@ def main() -> int:
                 return 3
 
         print("\n=== Running trials ===")
-        results: list[dict] = []
+        results: list[dict[str, Any]] = []
         results_lock = threading.Lock()
         failures: list[str] = []
         stop_event = threading.Event()
@@ -801,7 +809,7 @@ def main() -> int:
             print(f"!! {len(technical_errors)} technical error(s) "
                   f"(non-algorithmic); first: {technical_errors[0]['status']}")
 
-        with open(args.output, "w") as f:
+        with Path(args.output).open("w") as f:
             json.dump({
                 "config": {
                     "stacks": args.stacks,
@@ -824,7 +832,7 @@ def main() -> int:
             }, f, indent=2)
         print(f"\nDetailed results -> {args.output}")
 
-        with open(args.csv_summary, "w", newline="") as f:
+        with Path(args.csv_summary).open("w", newline="") as f:
             w = csv.writer(f)
             w.writerow([
                 "scenario", "optimization", "trials_passed",

@@ -10,15 +10,18 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from aiohttp import web
 
 LOG = logging.getLogger("attack.browser_bridge")
 
 
 class BrowserBridge:
     def __init__(self) -> None:
-        self._ws: Any = None
-        self._pending: dict[int, asyncio.Future] = {}
+        self._ws: web.WebSocketResponse | None = None
+        self._pending: dict[int, asyncio.Future[None]] = {}
         self._next_id = 0
         self._ready = asyncio.Event()
 
@@ -26,7 +29,7 @@ class BrowserBridge:
     def connected(self) -> bool:
         return self._ws is not None and not self._ws.closed
 
-    def set_ws(self, ws: Any) -> None:
+    def set_ws(self, ws: web.WebSocketResponse) -> None:
         self._ws = ws
         self._ready.set()
 
@@ -59,7 +62,7 @@ class BrowserBridge:
         finally:
             self._pending.pop(msg_id, None)
 
-    def on_message(self, data: dict) -> None:
+    def on_message(self, data: dict[str, Any]) -> None:
         cmd = data.get("cmd")
         if cmd == "done":
             msg_id = data.get("id")

@@ -23,6 +23,7 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -49,6 +50,8 @@ TUNNEL_PORT = int(os.environ.get("TUNNEL_PORT", "6379"))
 
 SNIFF_FILTER = f"tcp and (port {SERVER_PORT} or port {LISTEN_PORT})"
 SNIFF_IFACE = os.environ.get("SNIFF_IFACE", "eth0")
+
+EXPLOIT_PAGE = Path("/app/exploit.html")
 
 
 class PacketLog:
@@ -79,7 +82,7 @@ PACKET_LOG = PacketLog()
 BROWSER_BRIDGE = BrowserBridge()
 
 
-def _on_packet(pkt) -> None:
+def _on_packet(pkt: Any) -> None:
     if not pkt.haslayer(TCP) or not pkt.haslayer(IP):
         return
     ip = pkt[IP]
@@ -125,6 +128,8 @@ async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter, label: str
             dst.write(data)
             await dst.drain()
     except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):
+        # Either side hanging up mid-stream is the normal end of a forwarded
+        # session, not an error worth reporting.
         pass
     except Exception:  # noqa: BLE001
         LOG.exception("[%s] pipe error", label)
@@ -132,6 +137,7 @@ async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter, label: str
         try:
             dst.close()
         except Exception:  # noqa: BLE001
+            # Nothing left to forward, so a failing close changes nothing.
             pass
         # Debug-level: the Ansible scenario opens thousands of short-lived
         # SSH connections and we don't want to log each one.
@@ -219,8 +225,7 @@ async def handle_trigger_payload(request: web.Request) -> web.Response:
 
 
 async def handle_exploit(request: web.Request) -> web.Response:
-    with open("/app/exploit.html") as f:
-        return web.Response(text=f.read(), content_type="text/html")
+    return web.Response(text=EXPLOIT_PAGE.read_text(), content_type="text/html")
 
 
 async def handle_ws(request: web.Request) -> web.WebSocketResponse:
@@ -282,6 +287,8 @@ async def handle_run_attack(request: web.Request) -> web.Response:
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001
+            # An unparseable body is treated as "no overrides": every config
+            # field has an adapter default.
             body = {}
     scenario = body.get("scenario", "direct")
     overrides = dict(body.get("config", {}) or {})

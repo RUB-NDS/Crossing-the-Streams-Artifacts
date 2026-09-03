@@ -269,9 +269,9 @@ docker-compose stack. End-to-end correctness is verified by the
 - The alignment-data pool (`0x80..0x8F`), the per-scenario
   `min_margin`, `flush_bytes=32768` (the zlib LZ77 window size),
   `guess_prefill_bytes=16384`
-  (browser scenario only), and the adapter-specific ordering are
-  load-bearing. They are documented in the paper (sections 4 and 5)
-  and in the adapter docstrings.
+  (browser scenario only), and the adapter-specific ordering all
+  decide whether the attack works at all. They are documented in the
+  paper (sections 4 and 5) and in the adapter docstrings.
 - The 8-byte alignment sweep (`alignment_lengths=[0..7]`) assumes
   ChaCha20-Poly1305's padding granularity. AES-CTR + HMAC-ETM would
   require `[0..15]`. The negotiated cipher is visible at

@@ -10,8 +10,9 @@ Usage:
 import json
 import statistics
 import sys
+from pathlib import Path
 
-data = json.load(open(sys.argv[1]))
+data = json.loads(Path(sys.argv[1]).read_text())
 xs = [r["total_guesses"] for r in data["results"] if r.get("ok")]
 
 if not xs:

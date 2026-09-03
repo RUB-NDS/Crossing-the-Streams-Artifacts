@@ -18,6 +18,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from typing import Any, NoReturn
 
 ATTACKER_BASE = "http://127.0.0.1:9000"
 CLIENT_BASE = "http://127.0.0.1:8000"
@@ -32,8 +33,8 @@ TARGET_SECRET = "hunter2"  # len+1 = 8 -> length byte = \x08
 
 
 def http(method: str, url: str, body: bytes | None = None,
-         content_type: str | None = None, timeout: float = 1800.0) -> dict:
-    headers = {}
+         content_type: str | None = None, timeout: float = 1800.0) -> dict[str, Any]:
+    headers: dict[str, str] = {}
     if content_type:
         headers["Content-Type"] = content_type
     req = urllib.request.Request(url, method=method, data=body, headers=headers)
@@ -65,7 +66,7 @@ def step(title: str) -> None:
     print("=" * 72)
 
 
-def fail(msg: str) -> "NoReturn":  # type: ignore[name-defined]
+def fail(msg: str) -> NoReturn:
     print(f"FAIL: {msg}")
     sys.exit(1)
 

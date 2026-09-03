@@ -50,7 +50,7 @@ def _check_expected_match(
     committed_byte: bytes,
     position: int,
     expected: bytes | None,
-) -> dict | None:
+) -> dict[str, str] | None:
     """Compare a committed byte against the ground-truth `expected` stream.
 
     Returns None when there's nothing to check (no expected provided, or
@@ -99,7 +99,7 @@ def _trimmed_prefix(
 def _fork_applicable(
     config: AttackConfig,
     position: int,
-    pos_info: dict,
+    pos_info: dict[str, Any],
     depth: int,
 ) -> bool:
     if not config.candidate_fork_on_stall:
@@ -114,7 +114,7 @@ def _fork_applicable(
 
 
 def _select_fork_branches(
-    pos_info: dict,
+    pos_info: dict[str, Any],
     top_k: int,
     terminator: bytes,
 ) -> list[bytes]:
@@ -152,7 +152,7 @@ def _select_fork_branches(
 
 
 def _classify_fork_outcome(
-    branch_results: list[tuple[bytes, dict]],
+    branch_results: list[tuple[bytes, dict[str, Any]]],
 ) -> tuple[str, list[int]]:
     clean_indices = [
         i for i, (_best, info) in enumerate(branch_results)
@@ -170,10 +170,10 @@ async def resolve_stalled_position(
     config: AttackConfig,
     committed_prefix: bytes,
     position: int,
-    stalled_pos_info: dict,
+    stalled_pos_info: dict[str, Any],
     alignment_hint: int | None,
     depth: int,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Disambiguate a stalled position by speculatively running the next one.
 
     Returns 1..(max_fork_depth + 1) position-info dicts. The first is the
@@ -189,7 +189,7 @@ async def resolve_stalled_position(
             stalled_pos_info, position, reason="insufficient_branches",
         )]
 
-    branch_results: list[tuple[bytes, dict]] = []
+    branch_results: list[tuple[bytes, dict[str, Any]]] = []
     for branch_candidate in branches:
         hypothetical_recovered = committed_prefix + branch_candidate
         hypothetical_prefix = _trimmed_prefix(
@@ -268,7 +268,7 @@ async def resolve_stalled_position(
     else:
         parent_indices = list(range(len(branches)))
 
-    depth2_results: list[tuple[int, tuple[bytes, dict]]] = []
+    depth2_results: list[tuple[int, tuple[bytes, dict[str, Any]]]] = []
     for p_idx in parent_indices:
         parent_candidate = branches[p_idx]
         parent_N1_byte, _parent_info = branch_results[p_idx]
@@ -357,7 +357,7 @@ async def resolve_stalled_position(
 
 
 def _fork_origin_info(
-    stalled_pos_info: dict,
+    stalled_pos_info: dict[str, Any],
     *,
     position: int,
     best_candidate: bytes,
@@ -367,7 +367,7 @@ def _fork_origin_info(
     total_fork_guesses: int,
     outcome: str,
     committed_via_fork: list[int],
-) -> dict:
+) -> dict[str, Any]:
     return {
         **stalled_pos_info,
         "position": position,
@@ -390,8 +390,8 @@ def _fork_origin_info(
 
 
 def _fork_skipped_info(
-    stalled_pos_info: dict, position: int, reason: str,
-) -> dict:
+    stalled_pos_info: dict[str, Any], position: int, reason: str,
+) -> dict[str, Any]:
     return {
         **stalled_pos_info,
         "position": position,

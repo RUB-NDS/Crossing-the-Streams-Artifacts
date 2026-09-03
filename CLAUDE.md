@@ -6,9 +6,9 @@ with code in this repository.
 `README.md` is the canonical reference for layout, the architecture
 overview, the HTTP control surface, and how to run the artifact. The
 *paper* (not in the repo) covers the threat model, attack algorithm,
-load-bearing constants, and security analysis. This file covers only
-what's not there: repo workflow, cross-file architecture, and the
-pitfalls that bite during edits.
+the constants the attack depends on, and the security analysis. This
+file covers only what's not there: repo workflow, cross-file
+architecture, and the pitfalls that bite during edits.
 
 ## Common commands
 
@@ -146,7 +146,7 @@ stdev over the `total_guesses` field of passing trials.
 - **Rebuild after Python edits.** `attacker/` and `client/` sources are
   `COPY`'d at image build time, not bind-mounted. Host scripts won't
   see changes until the relevant service is rebuilt.
-- **Do not casually change the load-bearing constants.**
+- **Do not casually change the tuned constants.**
   `flush_bytes=32768` (32 KiB, the zlib LZ77 window size) and `flush_pool="secrets_random"` (direct/browser),
   `guess_prefill_bytes=16384` (browser only), alignment pool
   `0x80..0x8F`, the per-scenario `min_margin`, the adapter-specific
@@ -196,7 +196,7 @@ stdev over the `total_guesses` field of passing trials.
   launcher (navigates to the attacker-served exploit page), ansible
   runner.
 - `scripts/benchmark.py` -- multi-stack scenario harness;
-  `SCENARIO_PRESETS` is the single source of truth for the preset
+  `OPTIMIZATION_PRESETS` is the single source of truth for the preset
   toggle combinations.
 - `scripts/sweep_min_margin.sh` -- min-margin sweep that drives
   `benchmark.py` per (scenario, optimization). Exit-code contract above.

@@ -2,19 +2,19 @@
 from attacker.attack.alignment import _ALIGNMENT_POOL, make_alignment
 
 
-def test_pool_size_and_range():
+def test_pool_size_and_range() -> None:
     # 8-bit DEFLATE literals in the 0x80..0x8F range.
     assert list(_ALIGNMENT_POOL) == list(range(0x80, 0x90))
 
 
-def test_make_alignment_basic():
+def test_make_alignment_basic() -> None:
     assert make_alignment(0) == b""
     assert make_alignment(1) == bytes([0x80])
     assert make_alignment(3) == bytes([0x80, 0x81, 0x82])
     assert make_alignment(8) == bytes(range(0x80, 0x88))
 
 
-def test_make_alignment_rejects_too_long():
+def test_make_alignment_rejects_too_long() -> None:
     try:
         make_alignment(17)
     except ValueError:

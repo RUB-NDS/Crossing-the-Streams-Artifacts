@@ -16,6 +16,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from typing import Any, NoReturn
 
 ATTACKER_BASE = "http://127.0.0.1:9000"
 CLIENT_BASE = "http://127.0.0.1:8000"
@@ -23,8 +24,8 @@ RESP_PREFIX = "*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$"
 
 
 def http(method: str, url: str, body: bytes | None = None,
-         content_type: str | None = None, timeout: float = 1800.0) -> dict:
-    headers = {}
+         content_type: str | None = None, timeout: float = 1800.0) -> dict[str, Any]:
+    headers: dict[str, str] = {}
     if content_type:
         headers["Content-Type"] = content_type
     req = urllib.request.Request(url, method=method, data=body, headers=headers)
@@ -56,12 +57,14 @@ def step(title: str) -> None:
     print("=" * 72)
 
 
-def fail(msg: str) -> "NoReturn":  # type: ignore[name-defined]
+def fail(msg: str) -> NoReturn:
     print(f"FAIL: {msg}")
     sys.exit(1)
 
 
-def browser_attack(known_prefix: str, alphabet: str, max_length: int) -> dict:
+def browser_attack(
+    known_prefix: str, alphabet: str, max_length: int,
+) -> dict[str, Any]:
     body = json.dumps({
         "scenario": "browser",
         "config": {
@@ -93,7 +96,7 @@ def main() -> int:
     pf = cs.get("port_forwards", {})
     if not pf.get("redis_tunnel", {}).get("active"):
         fail("Redis tunnel port forward not active")
-    print(f"  [ok] Redis tunnel active")
+    print("  [ok] Redis tunnel active")
 
     if not cs.get("browser_connected"):
         fail("client reports browser_connected=false")
@@ -138,7 +141,7 @@ def main() -> int:
     print(f"    password = {password!r} ({r2['elapsed_seconds']:.1f}s)")
 
     print()
-    print(f"  Expected:  hunter2")
+    print("  Expected:  hunter2")
     print(f"  Recovered: {password}")
     print(f"  Total:     {elapsed:.1f}s")
     status = "PASS" if password == "hunter2" else "FAIL"

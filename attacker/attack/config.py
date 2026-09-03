@@ -8,7 +8,7 @@ over JSON and are decoded here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Literal
 
@@ -54,7 +54,7 @@ class AttackConfig:
 
     label: str = ""
 
-    def overlay(self, overrides: dict[str, Any]) -> "AttackConfig":
+    def overlay(self, overrides: dict[str, Any]) -> AttackConfig:
         converted: dict[str, Any] = {}
         for key, value in overrides.items():
             if value is None:

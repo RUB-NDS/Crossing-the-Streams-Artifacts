@@ -42,7 +42,9 @@ import os
 import signal
 import sys
 from collections import deque
-from typing import Optional
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+from typing import Any
 
 import redis.asyncio as aioredis
 from aiohttp import web
@@ -51,7 +53,7 @@ LOG = logging.getLogger("client")
 
 
 async def _drain_for_marker(
-    stream: Optional[asyncio.StreamReader],
+    stream: asyncio.StreamReader | None,
     marker: bytes,
     event: asyncio.Event,
     label: str,
@@ -71,14 +73,16 @@ async def _drain_for_marker(
                 LOG.debug("[%s] observed password-sent marker", label)
                 event.set()
     except (asyncio.CancelledError, OSError):
+        # Cancellation and a closed pipe both mean the subprocess is gone;
+        # there is nothing left to drain.
         pass
     except Exception:  # noqa: BLE001
         LOG.exception("[%s] drain error", label)
 
 
-KEYS_DIR = "/keys"
-SERVER_HOST_KEY_PUB = os.path.join(KEYS_DIR, "server_host_key.pub")
-CLIENT_KEY = os.path.join(KEYS_DIR, "client_user_key")
+KEYS_DIR = Path("/keys")
+SERVER_HOST_KEY_PUB = KEYS_DIR / "server_host_key.pub"
+CLIENT_KEY = KEYS_DIR / "client_user_key"
 
 SSH_TARGET_HOST = os.environ.get("SSH_TARGET_HOST", "attacker")
 SSH_TARGET_PORT = int(os.environ.get("SSH_TARGET_PORT", "2222"))
@@ -104,11 +108,12 @@ ANSIBLE_TUNNEL_DEST_PORT = int(os.environ.get("ANSIBLE_TUNNEL_DEST_PORT", "6379"
 DEFAULT_SECRET_VALUE = os.environ.get("SECRET_VALUE", "hunter2")
 DEFAULT_SUDO_SECRET = os.environ.get("SUDO_SECRET_VALUE", "hunter2")
 
-KNOWN_HOSTS_PATH = "/tmp/known_hosts"
-SSH_CONFIG_PATH = "/root/.ssh/config"
-ANSIBLE_INVENTORY_PATH = "/app/ansible/inventory.yml"
-ANSIBLE_PLAYBOOK_PATH = "/app/ansible/playbook.yml"
-ANSIBLE_VARS_PATH = "/tmp/ansible_vars.json"
+KNOWN_HOSTS_PATH = Path("/tmp/known_hosts")
+SSH_DIR = Path("/root/.ssh")
+SSH_CONFIG_PATH = SSH_DIR / "config"
+ANSIBLE_INVENTORY_PATH = Path("/app/ansible/inventory.yml")
+ANSIBLE_PLAYBOOK_PATH = Path("/app/ansible/playbook.yml")
+ANSIBLE_VARS_PATH = Path("/tmp/ansible_vars.json")
 
 # Marker emitted by Ansible's ssh connection plugin (plugins/connection/
 # ssh.py, line 1296) immediately before the sudo password is written to
@@ -123,23 +128,23 @@ class SSHState:
     """Manages the OpenSSH client subprocess and its local port forward."""
 
     def __init__(self, secret_value: str, sudo_secret: str) -> None:
-        self.ssh_proc: Optional[asyncio.subprocess.Process] = None
+        self.ssh_proc: asyncio.subprocess.Process | None = None
         self.secret_value: str = secret_value
         self.sudo_secret: str = sudo_secret
         self._lock = asyncio.Lock()
         self._negotiated: dict[str, str] = {}
-        self._stderr_task: Optional[asyncio.Task] = None
+        self._stderr_task: asyncio.Task[None] | None = None
         # Ring buffer of the most recent ssh -v stderr lines. Surfaced in
         # RuntimeError messages from _wait_for_tunnels so a 255-exit reports
         # the actual OpenSSH cause (e.g. "bind: Address already in use").
         self._stderr_tail: deque[str] = deque(maxlen=64)
-        self._playwright = None
-        self._browser = None
+        self._playwright: Any = None
+        self._browser: Any = None
         # Only one ansible-playbook runs at a time; a new /send_secret_ansible
         # call always kills the previous one before starting its own.
-        self.ansible_proc: Optional[asyncio.subprocess.Process] = None
+        self.ansible_proc: asyncio.subprocess.Process | None = None
         self._ansible_lock = asyncio.Lock()
-        self._ansible_drain_tasks: list[asyncio.Task] = []
+        self._ansible_drain_tasks: list[asyncio.Task[None]] = []
 
     def _write_known_hosts(self) -> None:
         """Pin the *real* server's host key under two names:
@@ -152,14 +157,11 @@ class SSHState:
           victim's sudo password. Going direct keeps the housekeeping
           traffic off the attacker's wire.
         """
-        with open(SERVER_HOST_KEY_PUB) as f:
-            key_line = f.read().strip()
-        lines = [
-            f"[{SSH_TARGET_HOST}]:{SSH_TARGET_PORT} {key_line}\n",
-            f"{SSH_REAL_SERVER} {key_line}\n",
-        ]
-        with open(KNOWN_HOSTS_PATH, "w") as f:
-            f.writelines(lines)
+        key_line = SERVER_HOST_KEY_PUB.read_text().strip()
+        KNOWN_HOSTS_PATH.write_text(
+            f"[{SSH_TARGET_HOST}]:{SSH_TARGET_PORT} {key_line}\n"
+            f"{SSH_REAL_SERVER} {key_line}\n"
+        )
         LOG.info("wrote known_hosts: %s", KNOWN_HOSTS_PATH)
 
     def _write_ssh_config(self) -> None:
@@ -202,11 +204,10 @@ class SSHState:
             "    Compression no\n"
             "    BatchMode yes\n"
         )
-        os.makedirs("/root/.ssh", exist_ok=True)
-        os.chmod("/root/.ssh", 0o700)
-        with open(SSH_CONFIG_PATH, "w") as f:
-            f.write(config)
-        os.chmod(SSH_CONFIG_PATH, 0o600)
+        SSH_DIR.mkdir(parents=True, exist_ok=True)
+        SSH_DIR.chmod(0o700)
+        SSH_CONFIG_PATH.write_text(config)
+        SSH_CONFIG_PATH.chmod(0o600)
         LOG.info("wrote ssh config: %s", SSH_CONFIG_PATH)
 
     def _build_ssh_cmd(self) -> list[str]:
@@ -224,7 +225,7 @@ class SSHState:
             "-o", "ExitOnForwardFailure=yes",
             "-o", "ServerAliveInterval=60",
             "-o", "ServerAliveCountMax=3",
-            "-i", CLIENT_KEY,
+            "-i", str(CLIENT_KEY),
             "-L", redis_fwd,
             "-p", str(SSH_TARGET_PORT),
             f"{SSH_USERNAME}@{SSH_TARGET_HOST}",
@@ -262,6 +263,7 @@ class SSHState:
                     line.decode("utf-8", errors="replace").rstrip()
                 )
         except (asyncio.CancelledError, OSError):
+            # Task cancelled on reconnect, or ssh exited and closed stderr.
             pass
 
     async def _parse_kex(self, timeout: float = 15) -> dict[str, str]:
@@ -411,7 +413,7 @@ class SSHState:
         if "\n" in new_password or "\r" in new_password:
             raise ValueError("sudo password must not contain newlines")
         ssh_cmd = [
-            "ssh", "-F", SSH_CONFIG_PATH, "server-root",
+            "ssh", "-F", str(SSH_CONFIG_PATH), "server-root",
             "chpasswd",
         ]
         LOG.info("set_sudo_password: SSHing to server-root to run chpasswd")
@@ -425,9 +427,8 @@ class SSHState:
         stdout, stderr = await proc.communicate(input=stdin_data)
         if proc.returncode != 0:
             raise RuntimeError(
-                "chpasswd failed (rc=%d): stdout=%r stderr=%r" % (
-                    proc.returncode, stdout, stderr,
-                )
+                f"chpasswd failed (rc={proc.returncode}): "
+                f"stdout={stdout!r} stderr={stderr!r}"
             )
         self.sudo_secret = new_password
         LOG.info("sudo password rotated (length=%d)", len(new_password))
@@ -451,6 +452,7 @@ class SSHState:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
             except ProcessLookupError:
+                # Already exited between the returncode check and the signal.
                 pass
             try:
                 await asyncio.wait_for(proc.wait(), timeout=3.0)
@@ -459,6 +461,7 @@ class SSHState:
                 try:
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 except ProcessLookupError:
+                    # Exited during the SIGTERM grace period after all.
                     pass
                 await proc.wait()
         for task in self._ansible_drain_tasks:
@@ -468,11 +471,13 @@ class SSHState:
             try:
                 await task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                # Awaited only to reap the cancelled task; whatever it raises
+                # on the way out is about a subprocess we just killed.
                 pass
         self._ansible_drain_tasks = []
         self.ansible_proc = None
 
-    async def send_secret_ansible(self, timeout: float = 20.0) -> dict:
+    async def send_secret_ansible(self, timeout: float = 20.0) -> dict[str, Any]:
         """Wait for any previous ansible-playbook run to exit, start a fresh
         one, and return as soon as Ansible has written the sudo password to
         ssh's stdin.
@@ -482,9 +487,10 @@ class SSHState:
 
             # Pass the password through a 0o600 file rather than --extra-vars
             # on argv so it doesn't show up in `ps`.
-            with open(ANSIBLE_VARS_PATH, "w") as f:
-                json.dump({"ansible_become_password": self.sudo_secret}, f)
-            os.chmod(ANSIBLE_VARS_PATH, 0o600)
+            ANSIBLE_VARS_PATH.write_text(
+                json.dumps({"ansible_become_password": self.sudo_secret}),
+            )
+            ANSIBLE_VARS_PATH.chmod(0o600)
 
             env = os.environ.copy()
             env["ANSIBLE_CONFIG"] = "/app/ansible/ansible.cfg"
@@ -499,9 +505,9 @@ class SSHState:
             cmd = [
                 "ansible-playbook",
                 "-vvv",
-                "-i", ANSIBLE_INVENTORY_PATH,
+                "-i", str(ANSIBLE_INVENTORY_PATH),
                 "--extra-vars", f"@{ANSIBLE_VARS_PATH}",
-                ANSIBLE_PLAYBOOK_PATH,
+                str(ANSIBLE_PLAYBOOK_PATH),
             ]
             LOG.debug("send_secret_ansible: launching %s", " ".join(cmd))
 
@@ -540,14 +546,11 @@ class SSHState:
             # password, connection refused).
             exit_task = asyncio.create_task(self.ansible_proc.wait())
             marker_task = asyncio.create_task(password_sent.wait())
-            try:
-                done, _ = await asyncio.wait(
-                    {exit_task, marker_task},
-                    timeout=timeout,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-            finally:
-                pass
+            done, _ = await asyncio.wait(
+                {exit_task, marker_task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
             if marker_task in done:
                 exit_task.cancel()
                 # Small settle so the CHANNEL_DATA finishes travelling
@@ -599,7 +602,7 @@ class SSHState:
                 await asyncio.sleep(1.0)
         LOG.error("could not load exploit page after 60 attempts")
 
-    def status(self) -> dict:
+    def status(self) -> dict[str, Any]:
         ansible_alive = (
             self.ansible_proc is not None
             and self.ansible_proc.returncode is None
@@ -645,8 +648,9 @@ class SSHState:
         }
 
 
-async def _retry_call(coro_factory, *, op_name: str,
-                      attempts: int = 3, delay: float = 1.0):
+async def _retry_call[T](coro_factory: Callable[[], Awaitable[T]], *,
+                         op_name: str, attempts: int = 3,
+                         delay: float = 1.0) -> T:
     """Call ``coro_factory()`` with retries on any exception.
 
     ``coro_factory`` is a no-arg callable returning a fresh coroutine on

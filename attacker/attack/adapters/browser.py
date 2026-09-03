@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import random
 import secrets
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from attacker.attack.config import AttackConfig, AlignmentMode
 from attacker.attack.adapters.direct import CLIENT_BASE, _sum_c2s
@@ -22,15 +22,18 @@ from attacker.attack.adapters.direct import CLIENT_BASE, _sum_c2s
 if TYPE_CHECKING:
     import aiohttp
 
+    from attacker.attack.adapters.browser_bridge import BrowserBridge
+    from attacker.mitm import PacketLog
+
 
 class BrowserAdapter:
-    def __init__(self, packet_log: Any, bridge: Any) -> None:
+    def __init__(self, packet_log: PacketLog, bridge: BrowserBridge) -> None:
         self._packet_log = packet_log
         self._bridge = bridge
         self._config: AttackConfig | None = None
-        self._session: "aiohttp.ClientSession | None" = None
+        self._session: aiohttp.ClientSession | None = None
 
-    async def setup(self, config: AttackConfig, http_session: "aiohttp.ClientSession") -> None:
+    async def setup(self, config: AttackConfig, http_session: aiohttp.ClientSession) -> None:
         self._config = config
         self._session = http_session
 
