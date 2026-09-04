@@ -1,5 +1,7 @@
 # Crossing the Streams: SSH Plaintext Recovery via a Common Compression Context in Multiplexed Channels - Artifacts
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22308155.svg)](https://doi.org/10.5281/zenodo.22308155)
+
 This repository accompanies the paper *Crossing the Streams: SSH
 Plaintext Recovery via a Common Compression Context in Multiplexed
 Channels*. It implements the adaptive compression attack of Section 4
