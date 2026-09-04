@@ -1,4 +1,4 @@
-# Adaptive Compression Attack on SSH — PoC Artifact
+# Crossing the Streams: SSH Plaintext Recovery via a Common Compression Context in Multiplexed Channels - Artifacts
 
 This repository accompanies the paper *Crossing the Streams: SSH
 Plaintext Recovery via a Common Compression Context in Multiplexed
