@@ -1,0 +1,52 @@
+{
+    "version": "v1",
+    "access_right": "open",
+    "publication_date": "2026-09-07",
+    "upload_type": "software",
+    "language": "eng",
+    "creators": [
+        {
+            "name": "Bäumer, Fabian",
+            "orcid": "0009-0006-5569-6625",
+            "affiliation": "Ruhr University Bochum"
+        },
+        {
+            "name": "Brinkmann, Marcus",
+            "orcid": "0000-0001-5649-6357",
+            "affiliation": "Ruhr University Bochum"
+        }
+    ],
+    "title": "Artifacts: Crossing the Streams: SSH Plaintext Recovery via a Common Compression Context in Multiplexed Channels (v1)",
+    "description": "Artifacts for the paper \"Crossing the Streams: SSH Plaintext Recovery via a Common Compression Context in Multiplexed Channels\", accepted at the ACM Conference on Computer and Communications Security (CCS) 2026.",
+    "license": "Apache-2.0",
+    "conference_acronym": "CCS '26",
+    "conference_dates": "15-19 November 2026",
+    "conference_place": "The Hague, The Netherlands",
+    "conference_title": "2026 ACM SIGSAC Conference on Computer and Communications Security",
+    "conference_url": "https://www.sigsac.org/ccs/CCS2026/",
+    "imprint_publisher": "Zenodo",
+    "related_identifiers": [
+        {
+            "identifier": "https://github.com/RUB-NDS/Crossing-the-Streams-Artifacts",
+            "relation": "isContinuedBy",
+            "resource_type": "software",
+            "scheme": "url"
+        },
+        {
+            "identifier": "https://github.com/RUB-NDS/Crossing-the-Streams-Artifacts/tree/v1",
+            "relation": "isSupplementTo",
+            "resource_type": "software",
+            "scheme": "url"
+        }
+    ],
+    "keywords": [
+        "SSH",
+        "Compression",
+        "LZ77",
+        "Deflate",
+        "zlib",
+        "Plaintext Recovery",
+        "Multiplexing",
+        "SSH Connection Protocol"
+    ]
+}
