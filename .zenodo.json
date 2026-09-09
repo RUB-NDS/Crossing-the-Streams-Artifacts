@@ -1,5 +1,5 @@
 {
-    "version": "v1",
+    "version": "v2",
     "access_right": "open",
     "publication_date": "2026-09-04",
     "upload_type": "software",
@@ -16,12 +16,12 @@
             "affiliation": "Ruhr University Bochum"
         }
     ],
-    "title": "Artifacts: Crossing the Streams: SSH Plaintext Recovery via a Common Compression Context in Multiplexed Channels (v1)",
+    "title": "Artifacts: Crossing the Streams: SSH Plaintext Recovery via a Common Compression Context in Multiplexed Channels (v2)",
     "description": "Artifacts for the paper \"Crossing the Streams: SSH Plaintext Recovery via a Common Compression Context in Multiplexed Channels\", accepted at the ACM Conference on Computer and Communications Security (CCS) 2026.",
     "license": "Apache-2.0",
     "conference_acronym": "CCS '26",
     "conference_dates": "15-19 November 2026",
-    "conference_place": "The Hague, The Netherlands",
+    "conference_place": "The Hague, Netherlands",
     "conference_title": "2026 ACM SIGSAC Conference on Computer and Communications Security",
     "conference_url": "https://www.sigsac.org/ccs/CCS2026/",
     "imprint_publisher": "Zenodo",
@@ -37,6 +37,21 @@
             "relation": "isSupplementTo",
             "resource_type": "software",
             "scheme": "url"
+        },
+        {
+            "identifier": "arXiv:2609.07709",
+            "relation": "isAlternateIdentifier",
+            "scheme": "arxiv"
+        },
+        {
+            "identifier": "10.1145/3830454.3846537",
+            "relation": "isAlternateIdentifier",
+            "scheme": "doi"
+        },
+        {
+            "identifier": "979-8-4007-2871-6",
+            "relation": "isAlternateIdentifier",
+            "scheme": "isbn"
         }
     ],
     "keywords": [
