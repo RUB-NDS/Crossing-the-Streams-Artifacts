@@ -11,7 +11,8 @@
 #   ./artifact-evaluation/scenario2_browser.sh --commit-margin 96
 #
 # Any extra arguments are passed through to scripts/verify_browser.py.
-# This is the slowest scenario: expect roughly 20-40 minutes.
+# This is by far the slowest scenario: expect 60-90 minutes. A single
+# byte took 635 s at mu = 88 on Docker Desktop for macOS.
 #
 # Firefox is required (not Chromium/WebKit): the page origin is
 # http://attacker:9000 and the beacon target is http://localhost:6379, a

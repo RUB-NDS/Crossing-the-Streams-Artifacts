@@ -87,10 +87,16 @@ arguments are passed through to the underlying `scripts/verify_*.py`.
 
 | Scenario | Typical runtime | Default commit margin |
 | :--- | ---: | ---: |
-| 1, direct | 15-30 min | 80 |
-| 2, browser | 25-45 min | 88 |
-| 3, ansible | 5-15 min | 8 |
+| 1, direct | ~20 min | 80 |
+| 2, browser | 60-90 min | 88 |
+| 3, ansible | ~6 min | 8 |
 | 4, published | seconds | n/a |
+
+These are measured on Docker Desktop for macOS, one byte at a time: the
+browser scenario took 635 s for a single byte at mu = 88, so budget well
+over an hour for the whole password. It is the slowest by a wide margin
+because every guess is carried by the victim's browser and the adapter
+regenerates a 32 KiB flush plus a 16 KiB guess prefill per measurement.
 
 Watch progress per byte while an attack runs:
 
