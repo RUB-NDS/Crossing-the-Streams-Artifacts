@@ -3,6 +3,13 @@
 Run from the host while the docker-compose stack is up:
 
     python scripts/verify_browser.py
+    python scripts/verify_browser.py --commit-margin 96
+
+This is the noisiest of the three scenarios: the guess travels through
+the victim's browser, so the adapter already defaults to a commit margin
+of 64 (against 16 for direct and 8 for ansible). If a recovery still
+returns a wrong password, raise it in 8-byte steps. See
+ARTIFACT-EVALUATION.md, "Tuning the commit margin".
 
 Checks: HTTP control APIs reachable, SSH up with zlib compression, Redis
 tunnel active, browser connected via WebSocket, packets observed during
@@ -11,7 +18,9 @@ Redis AUTH, and a two-phase recovery of "hunter2".
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -62,22 +71,57 @@ def fail(msg: str) -> NoReturn:
     sys.exit(1)
 
 
+def _env_int(name: str) -> int | None:
+    raw = os.environ.get(name)
+    return int(raw) if raw not in (None, "") else None
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    ap = argparse.ArgumentParser(
+        description="Browser-injection verification (Section 5.2).",
+    )
+    ap.add_argument(
+        "--commit-margin", type=int, default=_env_int("AE_COMMIT_MARGIN"),
+        help="Commit margin mu (Section 4.2). Default: the browser adapter's "
+             "built-in 64. Raise in 8-byte steps (72, 80, 96, ...) if a "
+             "recovery returns a wrong password.",
+    )
+    ap.add_argument(
+        "--max-rounds", type=int, default=_env_int("AE_MAX_ROUNDS"),
+        help="Per-position round cap. Default: the adapter's built-in 128.",
+    )
+    ap.add_argument(
+        "--fail-fast", action="store_true",
+        default=os.environ.get("AE_FAIL_FAST") == "1",
+        help="Send the ground truth as 'expected' so the engine aborts on the "
+             "first wrong byte instead of grinding to max_rounds.",
+    )
+    return ap.parse_args(argv)
+
+
 def browser_attack(
     known_prefix: str, alphabet: str, max_length: int,
+    args: argparse.Namespace, expected: str | None = None,
 ) -> dict[str, Any]:
-    body = json.dumps({
-        "scenario": "browser",
-        "config": {
-            "known_prefix": known_prefix,
-            "alphabet": alphabet,
-            "max_length": max_length,
-        },
-    }).encode("utf-8")
+    config: dict[str, Any] = {
+        "known_prefix": known_prefix,
+        "alphabet": alphabet,
+        "max_length": max_length,
+    }
+    if args.commit_margin is not None:
+        config["commit_margin"] = args.commit_margin
+    if args.max_rounds is not None:
+        config["max_rounds"] = args.max_rounds
+    payload: dict[str, Any] = {"scenario": "browser", "config": config}
+    if expected is not None and args.fail_fast:
+        payload["expected"] = expected
+    body = json.dumps(payload).encode("utf-8")
     return http("POST", f"{ATTACKER_BASE}/run_attack", body=body,
                 content_type="application/json")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
     step("1. Wait for HTTP control APIs")
     wait_for(f"{ATTACKER_BASE}/status", "attacker")
     wait_for(f"{CLIENT_BASE}/status", "client")
@@ -128,14 +172,15 @@ def main() -> int:
     t0 = time.time()
 
     print("  Phase 1: recovering password length...")
-    r1 = browser_attack(RESP_PREFIX, "0123456789", 4)
+    r1 = browser_attack(RESP_PREFIX, "0123456789", 4, args,
+                        expected="7")
     pw_len = r1["recovered"]
     print(f"    length = {pw_len} ({r1['elapsed_seconds']:.1f}s)")
 
     print("  Phase 2: recovering password...")
     r2 = browser_attack(RESP_PREFIX + pw_len + "\r\n",
-                       "abcdefghijklmnopqrstuvwxyz0123456789",
-                       int(pw_len) + 4)
+                        "abcdefghijklmnopqrstuvwxyz0123456789",
+                        int(pw_len) + 4, args, expected="hunter2\r")
     password = r2["recovered"]
     elapsed = time.time() - t0
     print(f"    password = {password!r} ({r2['elapsed_seconds']:.1f}s)")

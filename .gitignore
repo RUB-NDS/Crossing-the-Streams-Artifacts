@@ -5,6 +5,9 @@ __pycache__/
 *.pyd
 # Claude Code local settings
 .claude/
+# Generated SSH host + client keys (recreated by the keygen service on
+# every `docker compose up`). Never commit these.
+keys/
 # Benchmark output
 benchmark_results.json
 benchmark_summary.csv
