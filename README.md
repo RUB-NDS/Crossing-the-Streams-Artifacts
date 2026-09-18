@@ -21,6 +21,12 @@ Refer to the paper for the attacker model, the attack algorithm, the
 security analysis, the results, and the discussion. This README only
 describes how to reproduce the artifact.
 
+**Artifact reviewers should start with
+[`ARTIFACT-EVALUATION.md`](ARTIFACT-EVALUATION.md).** It wraps the three
+proof-of-concept attacks and the Table 3 measurements into four
+one-command scenarios, and documents the commit margin -- the one
+setting that decides whether a run reproduces on your host.
+
 
 ## Requirements
 
@@ -36,13 +42,28 @@ describes how to reproduce the artifact.
 docker compose up -d --build
 
 # 2. Run the per-scenario verifications. Each recovers "hunter2" end-to-end.
-python scripts/verify_direct.py     # Section 5.1, ~2 min
-python scripts/verify_browser.py    # Section 5.2, ~17 min
-python scripts/verify_ansible.py    # Section 5.3, ~4 min
+python scripts/verify_direct.py     # Section 5.1
+python scripts/verify_browser.py    # Section 5.2
+python scripts/verify_ansible.py    # Section 5.3
 
 # 3. Watch per-byte progress while an attack is running.
 docker compose logs -f attacker
 ```
+
+These run at each adapter's built-in commit margin, which is tuned to the
+machine the paper was measured on. On a noisier host a run can commit a
+wrong byte and report a confident, wrong password -- the engine never
+revisits a committed byte. Raise the margin in 8-byte steps until the
+recovery is stable:
+
+```bash
+python scripts/verify_direct.py --commit-margin 80 --fail-fast
+```
+
+`--fail-fast` aborts at the first wrong byte instead of grinding to
+`max_rounds`. See [`ARTIFACT-EVALUATION.md`](ARTIFACT-EVALUATION.md),
+"Tuning the commit margin", for the margin at which each Table 3 cell
+reached 100 % recovery.
 
 
 ## Reproducing Table 3
@@ -118,6 +139,13 @@ shape: `results/` is compensation-first with uppercase labels
 
 ```
 README.md                          — this file
+ARTIFACT-EVALUATION.md             — reviewer guide: the four scenarios
+artifact-evaluation/               — one script per scenario
+    scenario1_direct.sh            — Section 5.1 end-to-end
+    scenario2_browser.sh           — Section 5.2 end-to-end
+    scenario3_ansible.sh           — Section 5.3 end-to-end
+    scenario4_table3.sh            — Table 3 (published / quick / full)
+    table3.py                      — recompute Table 3 from a results tree
 docker-compose.yml                 — five services on the sshpoc bridge
 docker-compose.bench.yml           — overlay for N parallel benchmark stacks
 keys/                              — Ed25519 host + client keys (generated)

