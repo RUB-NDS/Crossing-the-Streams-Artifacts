@@ -1,5 +1,5 @@
 {
-    "version": "v2",
+    "version": "v3",
     "access_right": "open",
     "publication_date": "2026-09-04",
     "upload_type": "software",
@@ -16,7 +16,7 @@
             "affiliation": "Ruhr University Bochum"
         }
     ],
-    "title": "Artifacts: Crossing the Streams: SSH Plaintext Recovery via a Common Compression Context in Multiplexed Channels (v2)",
+    "title": "Artifacts: Crossing the Streams: SSH Plaintext Recovery via a Common Compression Context in Multiplexed Channels (v3)",
     "description": "Artifacts for the paper \"Crossing the Streams: SSH Plaintext Recovery via a Common Compression Context in Multiplexed Channels\", accepted at the ACM Conference on Computer and Communications Security (CCS) 2026.",
     "license": "Apache-2.0",
     "conference_acronym": "CCS '26",
