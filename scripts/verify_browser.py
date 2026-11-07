@@ -2,7 +2,7 @@
 
 Run from the host while the docker-compose stack is up:
 
-    python scripts/verify_browser.py
+    python scripts/verify_browser.py [--timeout SECONDS]
 
 Checks: HTTP control APIs reachable, SSH up with zlib compression, Redis
 tunnel active, browser connected via WebSocket, packets observed during
@@ -11,6 +11,7 @@ Redis AUTH, and a two-phase recovery of "hunter2".
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import time
@@ -63,7 +64,7 @@ def fail(msg: str) -> NoReturn:
 
 
 def browser_attack(
-    known_prefix: str, alphabet: str, max_length: int,
+    known_prefix: str, alphabet: str, max_length: int, timeout: float,
 ) -> dict[str, Any]:
     body = json.dumps({
         "scenario": "browser",
@@ -74,10 +75,18 @@ def browser_attack(
         },
     }).encode("utf-8")
     return http("POST", f"{ATTACKER_BASE}/run_attack", body=body,
-                content_type="application/json")
+                content_type="application/json", timeout=timeout)
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--timeout", type=float, default=7200.0,
+                    help="HTTP timeout in seconds for each attack request "
+                         "(default: 7200)")
+    args = ap.parse_args()
+
     step("1. Wait for HTTP control APIs")
     wait_for(f"{ATTACKER_BASE}/status", "attacker")
     wait_for(f"{CLIENT_BASE}/status", "client")
@@ -128,14 +137,14 @@ def main() -> int:
     t0 = time.time()
 
     print("  Phase 1: recovering password length...")
-    r1 = browser_attack(RESP_PREFIX, "0123456789", 4)
+    r1 = browser_attack(RESP_PREFIX, "0123456789", 4, args.timeout)
     pw_len = r1["recovered"]
     print(f"    length = {pw_len} ({r1['elapsed_seconds']:.1f}s)")
 
     print("  Phase 2: recovering password...")
     r2 = browser_attack(RESP_PREFIX + pw_len + "\r\n",
                        "abcdefghijklmnopqrstuvwxyz0123456789",
-                       int(pw_len) + 4)
+                       int(pw_len) + 4, args.timeout)
     password = r2["recovered"]
     elapsed = time.time() - t0
     print(f"    password = {password!r} ({r2['elapsed_seconds']:.1f}s)")

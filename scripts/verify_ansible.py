@@ -2,7 +2,7 @@
 
 Run from the host while the docker-compose stack is up:
 
-    python scripts/verify_ansible.py
+    python scripts/verify_ansible.py [--timeout SECONDS]
 
 Checks: HTTP control APIs reachable, SSH up with zlib compression,
 Ansible LocalForward declared, /set_sudo_secret round-trip works,
@@ -13,6 +13,7 @@ password itself).
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import time
@@ -72,6 +73,14 @@ def fail(msg: str) -> NoReturn:
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--timeout", type=float, default=1800.0,
+                    help="HTTP timeout in seconds for each attack request "
+                         "(default: 1800)")
+    args = ap.parse_args()
+
     step("1. Wait for HTTP control APIs")
     wait_for(f"{ATTACKER_BASE}/status", "attacker")
     wait_for(f"{CLIENT_BASE}/status", "client")
@@ -150,7 +159,8 @@ def main() -> int:
         },
     }).encode("utf-8")
     r1 = http("POST", f"{ATTACKER_BASE}/run_attack",
-              body=phase1_body, content_type="application/json")
+              body=phase1_body, content_type="application/json",
+              timeout=args.timeout)
     if not r1.get("ok"):
         fail(f"Phase 1 attack failed: {r1}")
     length_str = r1["recovered"]
@@ -182,7 +192,8 @@ def main() -> int:
         },
     }).encode("utf-8")
     r2 = http("POST", f"{ATTACKER_BASE}/run_attack",
-              body=phase2_body, content_type="application/json")
+              body=phase2_body, content_type="application/json",
+              timeout=args.timeout)
     if not r2.get("ok"):
         fail(f"Phase 2 attack failed: {r2}")
     password = r2["recovered"].rstrip("\n")

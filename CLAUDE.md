@@ -20,7 +20,7 @@ docker compose up -d --build
 docker compose build attacker && docker compose up -d attacker
 docker compose build client   && docker compose up -d client
 
-# End-to-end verification (each ~ 2-17 min)
+# End-to-end verification (each ~ 2-70 min; --timeout SECONDS sets the HTTP timeout)
 python scripts/verify_direct.py
 python scripts/verify_browser.py
 python scripts/verify_ansible.py

@@ -92,7 +92,11 @@ for Table 3, organized by scenario and configuration. The benchmark
 creates 8-character lowercase passwords using a configurable random seed.
 The original measurements used seed 42 for direct and browser injection
 and seed 4253 for Ansible. [E4](#e4-table-3) identifies the files and
-parameters corresponding to the reported results.
+parameters corresponding to the reported results. Passwords with other
+characters, such as digits or symbols, were not evaluated for Table 3.
+The benchmark option `--alphabet` selects another set of single-byte
+characters. Each measurement round tests every remaining candidate, so
+the number of guesses grows with the alphabet size.
 
 ## Set Up
 
@@ -133,7 +137,18 @@ python -m attacker.attack.tests.test_alignment
 python -m attacker.attack.tests.test_fork
 ```
 
-Each command prints a line ending in `ok` and exits with code 0.
+Each command prints a line ending in `ok` and exits with code 0. The
+modules test the following parts of the attack engine:
+
+- `test_config`: conversion of JSON configuration overrides into the
+  attack configuration.
+- `test_engine_helpers`: selection of alignment lengths and trimming of
+  the known prefix.
+- `test_engine_expected`: early abort when a recovered byte differs from
+  the expected value.
+- `test_alignment`: generation of alignment bytes.
+- `test_fork`: the fork-on-stall fallback, which is disabled in all
+  configurations.
 
 Check the running testbed through its control APIs:
 
@@ -174,15 +189,17 @@ client starts.
 
 ### Expected Results
 
-Times are estimates and exclude the initial image build. E1–E3 each
-require about 2 person-minutes; E4 requires about 15 person-minutes to
-analyze the included data.
+Times are estimates and exclude the initial image build. Compute times
+for E1–E3 depend on the host and on measurement noise; the upper values
+were observed by artifact evaluators. E1–E3 each require about 2
+person-minutes; E4 requires about 15 person-minutes to analyze the
+included data.
 
 | Experiment | Claim | Expected result | Approximate compute time |
 | :--- | :--- | :--- | :--- |
-| [E1: Direct injection](#e1-direct-plaintext-injection) | C1 | Recover `hunter2`; `VERIFICATION PASSED`; exit code 0 | 2 minutes |
-| [E2: Browser injection](#e2-browser-based-plaintext-injection) | C2 | Recover `hunter2`; `Status: PASS`; exit code 0 | 17 minutes |
-| [E3: Ansible](#e3-ansible-password-recovery) | C3 | Recover `hunter2`; `Status: PASS`; exit code 0 | 4 minutes |
+| [E1: Direct injection](#e1-direct-plaintext-injection) | C1 | Recover `hunter2`; `VERIFICATION PASSED`; exit code 0 | 2–5 minutes |
+| [E2: Browser injection](#e2-browser-based-plaintext-injection) | C2 | Recover `hunter2`; `Status: PASS`; exit code 0 | 17–70 minutes |
+| [E3: Ansible](#e3-ansible-password-recovery) | C3 | Recover `hunter2`; `Status: PASS`; exit code 0 | 4–7 minutes |
 | [E4: Table 3](#e4-table-3) | C4 | Statistics match Table 3; `n` is 100 for each of the 13 evaluated combinations | 1 minute using included data |
 
 ### Running, Monitoring, and Restarting Attacks
@@ -223,7 +240,7 @@ After evaluation, stop the verification testbed with `docker compose down`.
 
 #### E1: Direct Plaintext Injection
 
-**Claim:** C1. **Time:** 2 person-minutes + approximately 2 compute-minutes.
+**Claim:** C1. **Time:** 2 person-minutes + approximately 2–5 compute-minutes.
 
 **Preparation:** Complete [Set Up](#set-up) and confirm that no other
 verification script is running.
@@ -243,9 +260,15 @@ recovers `hunter2`, prints `VERIFICATION PASSED`, and exits with code 0.
 An incorrect password causes exit code 1. For noisy failures, follow
 [Troubleshooting](#troubleshooting).
 
+The guess counts are not directly comparable to Table 3. The
+verification uses a 36-character alphabet (lowercase letters and
+digits), the adaptive alignment sweep with candidate elimination, and
+commit margin 16, and typically needs 2,000–3,000 guesses for
+`hunter2`.
+
 #### E2: Browser-Based Plaintext Injection
 
-**Claim:** C2. **Time:** 2 person-minutes + approximately 17 compute-minutes.
+**Claim:** C2. **Time:** 2 person-minutes + approximately 17–70 compute-minutes.
 
 **Preparation:** Complete [Set Up](#set-up). Confirm that the attacker
 status reports `browser_connected: true` and no other verification
@@ -266,9 +289,14 @@ on success. HTTP framing introduces additional measurement noise,
 addressed by an alignment sweep and a higher commit margin. For noisy
 failures, follow [Troubleshooting](#troubleshooting).
 
+E2 has the largest runtime variation. The script waits up to 7200
+seconds for each attack phase. If it times out while the attacker logs
+still show progress, recreate the testbed and rerun it with a larger
+timeout, e.g., `python scripts/verify_browser.py --timeout 14400`.
+
 #### E3: Ansible Password Recovery
 
-**Claim:** C3. **Time:** 2 person-minutes + approximately 4 compute-minutes.
+**Claim:** C3. **Time:** 2 person-minutes + approximately 4–7 compute-minutes.
 
 **Preparation:** Complete [Set Up](#set-up) and confirm that no other
 verification script is running.
@@ -487,11 +515,11 @@ controls and their relation to the paper.
 ### HTTP Timeouts
 
 If the host script times out while the attacker logs still show progress,
-increase the HTTP request timeout in that script. Direct verification
-uses `timeout=3600` in its attack `urlopen()` call. Browser and Ansible
-verification use `timeout=1800.0` in their `http()` helpers. Values are in
-seconds. Recreate the testbed before retrying; a host timeout does not
-ensure that the attack inside the container has stopped.
+rerun it with a larger HTTP request timeout using `--timeout SECONDS`.
+The defaults are 3600 seconds for direct, 7200 seconds for browser, and
+1800 seconds for Ansible verification. Recreate the testbed before
+retrying; a host timeout does not ensure that the attack inside the
+container has stopped.
 
 ## Repository Layout
 

@@ -2,7 +2,7 @@
 
 Run from the host while the docker-compose stack is up:
 
-    python scripts/verify_direct.py
+    python scripts/verify_direct.py [--timeout SECONDS]
 
 Checks: HTTP control APIs reachable, SSH up with zlib compression, Redis
 tunnel active, packets observed during Redis AUTH and during a payload
@@ -11,6 +11,7 @@ injection through the tunnel, and a two-phase recovery of "hunter2".
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import time
@@ -58,7 +59,7 @@ def fail(msg: str) -> NoReturn:
 
 
 def _run_attack(scenario: str, known_prefix: str, alphabet: str,
-                max_length: int) -> dict[str, Any]:
+                max_length: int, timeout: float) -> dict[str, Any]:
     body = json.dumps({
         "scenario": scenario,
         "config": {
@@ -73,11 +74,19 @@ def _run_attack(scenario: str, known_prefix: str, alphabet: str,
         data=body,
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=3600) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--timeout", type=float, default=3600.0,
+                    help="HTTP timeout in seconds for each attack request "
+                         "(default: 3600)")
+    args = ap.parse_args()
+
     step("1. Wait for HTTP control APIs")
     wait_for(f"{ATTACKER_BASE}/status", "attacker")
     wait_for(f"{CLIENT_BASE}/status", "client")
@@ -146,7 +155,7 @@ def main() -> int:
 
     RESP_PREFIX = "*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$"
     t0 = time.time()
-    r1 = _run_attack("direct", RESP_PREFIX, "0123456789", 4)
+    r1 = _run_attack("direct", RESP_PREFIX, "0123456789", 4, args.timeout)
     if not r1.get("ok"):
         fail(f"phase 1 failed: {r1}")
     pw_len = r1["recovered"]
@@ -156,6 +165,7 @@ def main() -> int:
     r2 = _run_attack(
         "direct", RESP_PREFIX + pw_len + "\r\n",
         "abcdefghijklmnopqrstuvwxyz0123456789", int(pw_len) + 4,
+        args.timeout,
     )
     if not r2.get("ok"):
         fail(f"phase 2 failed: {r2}")
